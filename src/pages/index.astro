@@ -1,0 +1,63 @@
+---
+import Base from '../layouts/Base.astro';
+import '../styles/app.css';
+---
+
+<Base title="Tómbola para sorteos">
+  <div class="wrap">
+    <header style="margin-bottom: 28px;">
+      <h1>Tómbola para sorteos</h1>
+      <p class="muted" style="max-width: 60ch;">
+        Overlay transparente para OBS. Carga los participantes en el panel de control y proyecta
+        <code>/overlay</code> como fuente de navegador.
+      </p>
+    </header>
+
+    <div class="grid grid-2" style="margin-bottom: 24px;">
+      <a class="card" href="/overlay" style="text-decoration: none; color: inherit;">
+        <h2>Overlay</h2>
+        <p class="muted" style="margin: 0;">
+          La pantalla del sorteo. Es la que va como fuente de navegador en OBS.
+        </p>
+      </a>
+      <a class="card" href="/control" style="text-decoration: none; color: inherit;">
+        <h2>Control</h2>
+        <p class="muted" style="margin: 0;">
+          Cargar, editar e importar participantes. Ver también los ganadores ya sorteados.
+        </p>
+      </a>
+    </div>
+
+    <section class="card">
+      <h2>Atajos del overlay</h2>
+      <table>
+        <tbody>
+          <tr>
+            <td style="width: 130px;"><kbd>Espacio</kbd></td>
+            <td>Sortear</td>
+          </tr>
+          <tr>
+            <td><kbd>R</kbd></td>
+            <td>Reiniciar el bombo</td>
+          </tr>
+          <tr>
+            <td><kbd>M</kbd></td>
+            <td>Silenciar o activar el sonido</td>
+          </tr>
+          <tr>
+            <td><kbd>Esc</kbd></td>
+            <td>Cerrar el ganador y volver a cargar</td>
+          </tr>
+          <tr>
+            <td>Clic</td>
+            <td>Sortear, o cerrar el ganador si ya hay uno en pantalla</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="muted" style="margin-bottom: 0;">
+        El teclado depende de que la fuente de navegador de OBS tenga el foco. Para sortear sin
+        depender de eso, alcanza con hacer clic sobre el bombo.
+      </p>
+    </section>
+  </div>
+</Base>

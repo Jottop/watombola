@@ -1,0 +1,461 @@
+﻿---
+import Base from '../layouts/Base.astro';
+import { MAX_PARTICIPANTS } from '../lib/store';
+import '../styles/app.css';
+---
+
+<Base title="Tómbola · control">
+  <div class="wrap">
+    <header>
+      <h1>Control de la tómbola</h1>
+      <p class="muted">
+        Los participantes se guardan en este navegador. El overlay los lee al instante: mantén{" "}
+        <a href="/overlay" target="_blank">/overlay</a> abierto en OBS mientras editas.
+      </p>
+      <p>
+        <span class="pill" id="counter">0 participantes</span>
+        <span class="pill" id="limit-note">máximo {MAX_PARTICIPANTS}</span>
+      </p>
+    </header>
+
+    <section class="card" style="margin-bottom: 16px;">
+      <h2>Participantes desde Twitch</h2>
+      <p class="muted" style="margin-top: 0;">
+        Quien escriba <code id="command-preview">!entrar</code> en el chat del canal entra solo a
+        la tómbola. Escucha el <strong>overlay</strong>, no esta página.
+      </p>
+
+      <div class="row" style="margin-bottom: 14px;">
+        <label class="check" for="twitch-enabled">
+          <input id="twitch-enabled" type="checkbox" />
+          <span>Escuchar el chat de Twitch</span>
+        </label>
+      </div>
+
+      <div class="grid grid-2">
+        <div>
+          <label for="twitch-channel">Canal</label>
+          <input id="twitch-channel" type="text" placeholder="mi_canal" autocomplete="off" />
+        </div>
+        <div>
+          <label for="twitch-command">Comando</label>
+          <input id="twitch-command" type="text" placeholder="!entrar" autocomplete="off" />
+        </div>
+      </div>
+
+      <p class="muted" style="margin-bottom: 0; font-size: 0.85rem;">
+        Sin token ni cuenta: mtmi se conecta de forma anónima al IRC de Twitch en modo lectura.
+        Guarda los cambios y recarga la fuente del overlay en OBS para que los tome.
+      </p>
+    </section>
+
+    <section class="card" style="margin-bottom: 16px;">
+      <h2>Agregar</h2>
+      <form id="add-form" class="row">
+        <input
+          id="add-input"
+          name="nombre"
+          type="text"
+          placeholder="Nombre y apellido"
+          autocomplete="off"
+          required
+        />
+        <button class="primary" type="submit">Agregar</button>
+      </form>
+
+      <details style="margin-top: 14px;">
+        <summary class="muted">Carga masiva, importación o exportación</summary>
+        <div class="grid grid-2" style="margin-top: 14px;">
+          <div>
+            <label for="bulk">Pegar lista (uno por línea, o CSV)</label>
+            <textarea id="bulk" rows="7" placeholder={'Juan Perez\nAna Gomez\nCarlos Diaz'}></textarea>
+            <div class="row" style="margin-top: 10px;">
+              <button id="bulk-append" type="button">Agregar a la lista</button>
+              <button id="bulk-replace" type="button">Reemplazar lista</button>
+            </div>
+          </div>
+
+          <div>
+            <label for="file">Importar archivo .csv o .txt</label>
+            <input id="file" type="file" accept=".csv,.txt,text/plain,text/csv" />
+            <div class="row" style="margin-top: 10px;">
+              <button id="export" type="button">Exportar CSV</button>
+            </div>
+            <p class="muted" style="margin-top: 12px; font-size: 0.85rem;">
+              El archivo acepta una columna, o <code>nombre,apellido</code> separado por coma,
+              punto y coma o tabulación. Se ignoran duplicados y líneas vacías.
+            </p>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section class="card" style="margin-bottom: 16px;">
+      <div class="row section-head">
+        <h2 style="margin: 0;">Participantes</h2>
+        <input id="search" type="search" placeholder="Filtrar" style="max-width: 220px;" />
+      </div>
+
+      <div class="row toolbar">
+        <label class="check" for="test-data">
+          <input id="test-data" type="checkbox" />
+          <span>Datos de prueba al iniciar</span>
+        </label>
+        <div class="row">
+          <button id="load-mock" type="button">Cargar datos de ejemplo</button>
+          <button id="clear-all" class="danger" type="button">Vaciar todo</button>
+        </div>
+      </div>
+      <p class="muted toolbar-note">
+        Al activarlo entran los 57 nombres de prueba; al desactivarlos se van. No toca lo que
+        hayas cargado a mano o desde Twitch.
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 46px;">#</th>
+            <th>Nombre</th>
+            <th style="width: 110px;">Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <p id="no-results" class="muted" hidden>Nada coincide con ese filtro.</p>
+    </section>
+
+    <section class="card" style="margin-bottom: 16px;">
+      <div class="row section-head">
+        <h2 style="margin: 0;">Historial de sorteos</h2>
+        <button id="clear-draws" class="danger" type="button">Borrar historial</button>
+      </div>
+      <p class="muted" style="margin-top: 0;">Últimos 50 ganadores de esta sesión de navegador.</p>
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 180px;">Cuando</th>
+            <th>Ganador</th>
+            <th style="width: 110px;">Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="draws"></tbody>
+      </table>
+      <p id="no-draws" class="muted">Todavía no se sorteó nada.</p>
+    </section>
+
+    <section class="card" style="margin-top: 16px;">
+      <h2>Cómo usarlo en OBS</h2>
+      <ol class="steps">
+        <li>En OBS: <em>Fuentes</em> → <em>+</em> → <em>Navegador</em>.</li>
+        <li>URL: <code>http://localhost:4321/overlay</code> (o la de tu deploy).</li>
+        <li>Ancho <code>1920</code>, alto <code>1080</code>, FPS <code>60</code>.</li>
+        <li>Desmarca <em>Apagar la fuente cuando no sea visible</em>.</li>
+        <li>
+          En las propiedades de la fuente activa <em>Controlar el mouse mediante OBS</em> para
+          poder hacer clic sobre el bombo.
+        </li>
+        <li>
+          Para previsualizarla con fondo en el navegador: <code>/overlay?bg=dark</code>. Para dejar
+          los atajos visibles: <code>/overlay?help</code>.
+        </li>
+        <li>
+          El teclado depende de que la fuente de navegador tenga el foco. Para sortear sin depender
+          de eso, haz clic sobre el bombo.
+        </li>
+      </ol>
+    </section>
+
+    <section class="card" style="margin-top: 16px;">
+      <h2>Mantenimiento</h2>
+      <p class="muted" style="margin-top: 0;">
+        Borra todo lo que la app guarda en este navegador: participantes, historial, configuración de
+        Twitch y la preferencia de datos de prueba. La página se recarga y arranca de cero.
+      </p>
+      <button id="clear-cache" class="danger" type="button">Limpiar datos de la página</button>
+    </section>
+  </div>
+
+  <script>
+    import {
+      applyTestData,
+      clearDraws,
+      clearEverything,
+      clearParticipants,
+      deleteDraw,
+      isTestParticipant,
+      listDraws,
+      listParticipants,
+      makeId,
+      MAX_PARTICIPANTS,
+      normalizeName,
+      parseImportText,
+      readTwitchConfig,
+      saveParticipants,
+      toCsv,
+      writeTwitchConfig,
+    } from '../lib/store';
+    import type { Participant } from '../lib/types';
+
+    const rowsEl = document.getElementById('rows') as HTMLTableSectionElement;
+    const noResultsEl = document.getElementById('no-results') as HTMLElement;
+    const counterEl = document.getElementById('counter') as HTMLElement;
+    const searchEl = document.getElementById('search') as HTMLInputElement;
+    const addForm = document.getElementById('add-form') as HTMLFormElement;
+    const addInput = document.getElementById('add-input') as HTMLInputElement;
+    const bulkEl = document.getElementById('bulk') as HTMLTextAreaElement;
+    const fileEl = document.getElementById('file') as HTMLInputElement;
+    const drawsEl = document.getElementById('draws') as HTMLTableSectionElement;
+    const noDrawsEl = document.getElementById('no-draws') as HTMLElement;
+    const clearDrawsBtn = byId<HTMLButtonElement>('clear-draws');
+
+    let list: Participant[] = listParticipants();
+    let saveTimer: ReturnType<typeof setTimeout> | undefined;
+
+    /** Si el markup y el script se desincronizan, que lo diga claro en vez de
+     *  reventar con "cannot read addEventListener of null". */
+    function byId<T extends HTMLElement>(id: string): T {
+      const el = document.getElementById(id);
+      if (!el) throw new Error(`Falta el elemento #${id} en el markup de /control`);
+      return el as T;
+    }
+
+    function persist(): void {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => saveParticipants(list), 150);
+    }
+
+    function render(): void {
+      const term = searchEl.value.trim().toLowerCase();
+      const visible = term ? list.filter((p) => p.name.toLowerCase().includes(term)) : list;
+
+      counterEl.textContent = `${list.length} participante${list.length === 1 ? '' : 's'}`;
+      noResultsEl.hidden = visible.length > 0;
+      syncTestDataCheckbox();
+
+      rowsEl.innerHTML = visible
+        .map((p) => {
+          const index = list.indexOf(p);
+          return `<tr data-id="${p.id}">
+            <td class="muted">${index + 1}</td>
+            <td><input type="text" value="${escapeAttr(p.name)}" data-id="${p.id}" aria-label="Nombre" /></td>
+            <td><button class="danger" type="button" data-remove="${p.id}">Quitar</button></td>
+          </tr>`;
+        })
+        .join('');
+    }
+
+    function escapeAttr(value: string): string {
+      return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    }
+
+    function escapeHtml(value: string): string {
+      return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function renderDraws(): void {
+      const draws = listDraws();
+      noDrawsEl.hidden = draws.length > 0;
+      clearDrawsBtn.disabled = draws.length === 0;
+      drawsEl.innerHTML = draws
+        .map((d) => {
+          const when = new Date(d.drawnAt).toLocaleString('es', {
+            day: '2-digit',
+            month: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+          return `<tr>
+            <td class="muted">${when}</td>
+            <td>${escapeHtml(d.name)}</td>
+            <td><button class="danger" type="button" data-remove-draw="${escapeAttr(d.id)}">Quitar</button></td>
+          </tr>`;
+        })
+        .join('');
+    }
+
+    function addNames(names: string[], replace: boolean): void {
+      const incoming = parseImportText(names.join('\n'));
+      if (incoming.length === 0) return;
+
+      if (replace) {
+        list = incoming.slice(0, MAX_PARTICIPANTS);
+      } else {
+        const known = new Set(list.map((p) => p.name.toLowerCase()));
+        const fresh = incoming.filter((p) => !known.has(p.name.toLowerCase()));
+        list = [...list, ...fresh].slice(0, MAX_PARTICIPANTS);
+      }
+
+      saveParticipants(list);
+      render();
+    }
+
+    addForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const name = normalizeName(addInput.value);
+      if (name.length < 2 || list.length >= MAX_PARTICIPANTS) return;
+      list.push({ id: makeId(), name });
+      saveParticipants(list);
+      addInput.value = '';
+      render();
+      addInput.focus();
+    });
+
+    rowsEl.addEventListener('input', (event) => {
+      const target = event.target as HTMLInputElement;
+      const id = target.dataset.id;
+      if (!id) return;
+      const person = list.find((p) => p.id === id);
+      if (!person) return;
+      person.name = target.value;
+      persist();
+    });
+
+    rowsEl.addEventListener('focusout', (event) => {
+      const target = event.target as HTMLInputElement;
+      const id = target.dataset.id;
+      if (!id) return;
+      const person = list.find((p) => p.id === id);
+      if (!person) return;
+      person.name = normalizeName(person.name);
+      target.value = person.name;
+      persist();
+    });
+
+    rowsEl.addEventListener('click', (event) => {
+      const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-remove]');
+      if (!button) return;
+      list = list.filter((p) => p.id !== button.dataset.remove);
+      saveParticipants(list);
+      render();
+    });
+
+    searchEl.addEventListener('input', render);
+
+    // --- Historial ---------------------------------------------------------
+    drawsEl.addEventListener('click', (event) => {
+      const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
+        '[data-remove-draw]',
+      );
+      if (!button) return;
+      deleteDraw(button.dataset.removeDraw!);
+      renderDraws();
+    });
+
+    clearDrawsBtn.addEventListener('click', () => {
+      if (!listDraws().length) return;
+      if (!confirm('Se borran todos los ganadores del historial. ¿Deseas continuar?')) return;
+      clearDraws();
+      renderDraws();
+    });
+
+    byId<HTMLButtonElement>('clear-cache').addEventListener('click', () => {
+      if (
+        !confirm(
+          'Se borra TODO lo guardado en este navegador: participantes, historial, configuración de Twitch y datos de prueba. ¿Deseas continuar?',
+        )
+      ) {
+        return;
+      }
+      clearEverything();
+      location.reload();
+    });
+
+    byId<HTMLButtonElement>('bulk-append').addEventListener('click', () => {
+      addNames(bulkEl.value.split('\n'), false);
+      bulkEl.value = '';
+    });
+
+    byId<HTMLButtonElement>('bulk-replace').addEventListener('click', () => {
+      addNames(bulkEl.value.split('\n'), true);
+      bulkEl.value = '';
+    });
+
+    fileEl.addEventListener('change', async () => {
+      const file = fileEl.files?.[0];
+      if (!file) return;
+      addNames((await file.text()).split('\n'), false);
+      fileEl.value = '';
+    });
+
+    byId<HTMLButtonElement>('export').addEventListener('click', () => {
+      const blob = new Blob([toCsv(list)], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'participantes.csv';
+      link.click();
+      URL.revokeObjectURL(url);
+    });
+
+    byId<HTMLButtonElement>('load-mock').addEventListener('click', () => {
+      // Agrega los de ejemplo sin pisar lo que haya cargado a mano. Antes
+      // reemplazaba la lista entera y se llevaba puestos los de Twitch.
+      list = applyTestData(true);
+      render();
+    });
+
+    byId<HTMLButtonElement>('clear-all').addEventListener('click', () => {
+      if (!confirm('Esto borra todos los participantes de este navegador. ¿Deseas continuar?')) return;
+      clearParticipants();
+      list = [];
+      render();
+    });
+
+    // --- Datos de prueba ---------------------------------------------------
+    // El checkbox refleja si los datos de prueba ESTAN en la lista, no solo la
+    // preferencia: si el usuario vacio todo, el checkbox queda sin marcar.
+    const testDataEl = byId<HTMLInputElement>('test-data');
+
+    function syncTestDataCheckbox(): void {
+      testDataEl.checked = list.some(isTestParticipant);
+    }
+
+    testDataEl.addEventListener('change', () => {
+      list = applyTestData(testDataEl.checked);
+      render();
+    });
+
+    // --- Twitch ------------------------------------------------------------
+    const twitchEnabledEl = byId<HTMLInputElement>('twitch-enabled');
+    const twitchChannelEl = byId<HTMLInputElement>('twitch-channel');
+    const twitchCommandEl = byId<HTMLInputElement>('twitch-command');
+    const commandPreviewEl = byId<HTMLElement>('command-preview');
+
+    function loadTwitchForm(): void {
+      const cfg = readTwitchConfig();
+      twitchEnabledEl.checked = cfg.enabled;
+      twitchChannelEl.value = cfg.channel;
+      twitchCommandEl.value = cfg.command;
+      commandPreviewEl.textContent = cfg.command;
+    }
+
+    function saveTwitchForm(): void {
+      const cfg = writeTwitchConfig({
+        enabled: twitchEnabledEl.checked,
+        channel: twitchChannelEl.value.trim().toLowerCase(),
+        command: twitchCommandEl.value.trim(),
+      });
+      // La config se normaliza al guardar (un comando vacio vuelve al
+      // default), asi que se refleja en el formulario lo que quedo guardado.
+      twitchCommandEl.value = cfg.command;
+      commandPreviewEl.textContent = cfg.command;
+    }
+
+    for (const el of [twitchEnabledEl, twitchChannelEl, twitchCommandEl]) {
+      el.addEventListener('change', saveTwitchForm);
+    }
+    loadTwitchForm();
+
+    render();
+    renderDraws();
+    window.addEventListener('focus', () => {
+      list = listParticipants();
+      loadTwitchForm();
+      render();
+      renderDraws();
+    });
+  </script>
+</Base>

@@ -1,0 +1,542 @@
+﻿---
+import Base from '../layouts/Base.astro';
+---
+
+<Base title="Tómbola · overlay" bodyClass="overlay-body">
+  <main id="stage" class="stage">
+    <canvas id="drum" class="layer"></canvas>
+    <canvas id="fx" class="layer layer-fx"></canvas>
+
+    <section id="winner" class="winner" aria-live="polite">
+      <p class="winner-kicker">Ganador</p>
+      <h1 id="winner-name" class="winner-name"></h1>
+    </section>
+
+    <p id="nudge" class="nudge">Haz clic o pulsa una tecla para activar el sonido</p>
+
+    <p id="joined" class="joined" aria-live="polite"></p>
+
+    <p id="status" class="status"></p>
+
+    <p id="hint" class="hint">
+      <kbd>Espacio</kbd> sortear · <kbd>R</kbd> reiniciar · <kbd>M</kbd>
+      {" "}<span id="mute-state">silenciar</span> · <kbd>Esc</kbd> cerrar ganador
+    </p>
+  </main>
+
+  <script>
+    import {
+      advanceDrum,
+      admitParticipant,
+      createDrumState,
+      isBusy,
+      loadParticipants,
+      resetDrum,
+      startDraw,
+      SPIN_DURATION,
+      type DrumEvents,
+      type DrumState,
+    } from '../lib/drum-machine';
+    import { resizeWorld } from '../lib/physics';
+    import { renderDrum } from '../lib/renderer';
+    import {
+      addDraw,
+      listParticipants,
+      MAX_PARTICIPANTS,
+      readTwitchConfig,
+      toBallLabel,
+      upsertParticipant,
+    } from '../lib/store';
+    import type { Participant, ParticipantItem } from '../lib/types';
+    import { cryptoRandom } from '../lib/rng';
+    import { AudioEngine } from '../lib/audio';
+    import { Confetti } from '../lib/confetti';
+    import { connectTwitch, disconnectTwitch, twitchEntriesSoFar } from '../lib/twitch';
+
+    /** Si el markup y el script se desincronizan, que lo diga claro en vez de
+     *  fallar mas adelante con un null en un sitio inexplicable. */
+    function need<T extends HTMLElement>(id: string): T {
+      const el = document.getElementById(id);
+      if (!el) throw new Error(`Falta el elemento #${id} en el markup de /overlay`);
+      return el as T;
+    }
+
+    const stage = need<HTMLDivElement>('stage');
+    const drumCanvas = need<HTMLCanvasElement>('drum');
+    const fxCanvas = need<HTMLCanvasElement>('fx');
+    const winnerEl = need<HTMLElement>('winner');
+    const winnerNameEl = need<HTMLElement>('winner-name');
+    const nudgeEl = need<HTMLElement>('nudge');
+    const hintEl = need<HTMLElement>('hint');
+    const muteStateEl = need<HTMLElement>('mute-state');
+    const joinedEl = need<HTMLElement>('joined');
+    const statusEl = need<HTMLElement>('status');
+
+    // getContext devuelve null si el navegador no soporta Canvas 2D.
+    // El narrowing no llega a las closures si usamos function declarations
+    // (estan hoisted), asi que re-asignamos a const ya tipado.
+    const drumCtx = drumCanvas.getContext('2d');
+    const fx = fxCanvas.getContext('2d');
+    if (!drumCtx || !fx) throw new Error('Este overlay necesita soporte de Canvas 2D.');
+    const ctx = drumCtx;
+    const fxCtx = fx;
+
+    const params = new URLSearchParams(location.search);
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (params.has('bg')) document.body.classList.add('has-bg');
+
+    const audio = new AudioEngine();
+    const confetti = new Confetti(reduceMotion ? { gravity: 900 } : {});
+
+    const state: DrumState = createDrumState(0, 0, 300, MAX_PARTICIPANTS);
+    let participantsById = new Map<string, Participant>();
+    let lastSignature = '';
+    let view = { width: 0, height: 0 };
+    let showLabels = true;
+
+    function readItems(preloaded?: Participant[]): ParticipantItem[] {
+      const list = (preloaded ?? listParticipants()).slice(0, MAX_PARTICIPANTS);
+      participantsById = new Map(list.map((p) => [p.id, p]));
+      return list.map((p) => ({ id: p.id, label: toBallLabel(p.name) }));
+    }
+
+    function syncShowLabels(): void {
+      showLabels = state.world.balls.length <= 90;
+    }
+
+    // --- Aviso de anotados -------------------------------------------------
+    // Si se anotan 200 personas de golpe, apilar 200 avisos taparia el
+    // overlay: cada aviso REEMPLAZA al anterior en vez de acumularse.
+    let joinedTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function showJoined(name: string): void {
+      joinedEl.textContent = `Se anotó ${name}`;
+      joinedEl.classList.add('is-visible');
+      clearTimeout(joinedTimer);
+      joinedTimer = setTimeout(() => joinedEl.classList.remove('is-visible'), 2500);
+    }
+
+    function refreshStatus(): void {
+      if (!params.has('ui')) return;
+      const cfg = readTwitchConfig();
+      const listening = cfg.enabled && cfg.channel !== '';
+      statusEl.textContent = listening
+        ? `Escuchando #${cfg.channel} · ${cfg.command} · ${state.world.balls.length} anotados (${twitchEntriesSoFar()} por chat)`
+        : `Twitch apagado · ${state.world.balls.length} participantes`;
+    }
+
+    /** Alguien escribio el comando en el chat de Twitch. */
+    function admitFromChat(userId: string, displayName: string): void {
+      const participant = { id: userId, name: displayName };
+      const result = upsertParticipant(participant);
+      if (!result.added) return;
+
+      participantsById.set(userId, participant);
+      const outcome = admitParticipant(state, { id: userId, label: toBallLabel(displayName) });
+
+      if (outcome === 'busy') {
+        showJoined(`${displayName} (para el próximo sorteo)`);
+      } else if (outcome === 'full') {
+        joinedEl.textContent = 'La tómbola está llena';
+        joinedEl.classList.add('is-visible');
+        clearTimeout(joinedTimer);
+        joinedTimer = setTimeout(() => joinedEl.classList.remove('is-visible'), 2500);
+      } else {
+        showJoined(displayName);
+        audio.pop(0.15);
+      }
+
+      syncShowLabels();
+      refreshStatus();
+    }
+
+    function startTwitch(): void {
+      disconnectTwitch();
+      const cfg = readTwitchConfig();
+      if (!cfg.enabled || !cfg.channel) return;
+
+      connectTwitch(cfg, {
+        onEntry: (candidate) => admitFromChat(candidate.userId, candidate.displayName),
+      });
+    }
+
+    function layout(): void {
+      const width = stage.clientWidth || window.innerWidth;
+      const height = stage.clientHeight || window.innerHeight;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      view = { width, height };
+
+      for (const canvas of [drumCanvas, fxCanvas]) {
+        canvas.width = Math.max(1, Math.round(width * dpr));
+        canvas.height = Math.max(1, Math.round(height * dpr));
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      fxCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      const R = Math.max(90, Math.min(width * 0.28, height * 0.33, 420));
+      const cx = width / 2;
+      const cy = height * 0.42;
+      const changed = Math.abs(state.world.R - R) > 0.5;
+
+      resizeWorld(state.world, cx, cy, R);
+      if (changed && state.phase === 'idle') {
+        resetDrum(state, readItems(), cryptoRandom, events);
+      }
+      syncShowLabels();
+    }
+
+    function showWinner(name: string): void {
+      winnerNameEl.textContent = name;
+      winnerEl.classList.add('is-visible');
+    }
+
+    function hideWinner(): void {
+      winnerEl.classList.remove('is-visible');
+      winnerNameEl.textContent = '';
+    }
+
+    const events: DrumEvents = {
+      onPhaseChange(phase, previous) {
+        document.body.dataset.phase = phase;
+        if (phase === 'spinning') audio.startSpin();
+        if (previous === 'spinning' && phase !== 'spinning') audio.stopSpin();
+      },
+      onEject(_ball, remaining) {
+        audio.pop(1 - remaining / Math.max(1, state.ejectOrder.length));
+      },
+      onReveal(ball) {
+        const participant = participantsById.get(ball.id);
+        if (participant) addDraw(participant);
+        showWinner(participant ? participant.name : ball.label);
+        audio.fanfare();
+        if (!reduceMotion) {
+          confetti.burst(view.width / 2, view.height * 0.52, 220);
+        }
+      },
+    };
+
+    function doReset(): void {
+      hideWinner();
+      confetti.clear();
+      audio.stopSpin();
+      // resetDrum lee la lista en vivo, asi que si hubo cambios durante el
+      // sorteo quedan aplicados de una.
+      resetDrum(state, readItems(), cryptoRandom, events);
+      lastSignature = signatureOf(listParticipants());
+      refreshStatus();
+    }
+
+    function reloadParticipants(preloaded?: Participant[]): void {
+      // Si el bombo esta girando, recargar ahora lo romperia. No hace falta
+      // marcar nada pendiente: doReset() vuelve a leer la lista.
+      if (!loadParticipants(state, readItems(preloaded), cryptoRandom)) return;
+
+      syncShowLabels();
+      refreshStatus();
+    }
+
+    /** Firma barata de la lista, para detectar cambios sin comparar objetos. */
+    function signatureOf(list: readonly Participant[]): string {
+      return `${list.length}:${list.map((p) => p.id).join(',')}`;
+    }
+
+    /**
+     * El evento 'storage' alcanza solo entre pestanas del mismo navegador y se
+     * pierde si la otra pestana esta en segundo plano. Este sondeo es la red
+     * de seguridad: el overlay converge solo aunque nunca llegue el evento.
+     */
+    function pollParticipants(): void {
+      const list = listParticipants();
+      const signature = signatureOf(list);
+      if (signature === lastSignature) return;
+      lastSignature = signature;
+      reloadParticipants(list);
+    }
+
+    async function trigger(): Promise<void> {
+      await audio.unlock();
+      refreshNudge();
+
+      if (state.phase === 'idle') {
+        hideWinner();
+        startDraw(state, cryptoRandom, events);
+      }
+    }
+
+    function toggleMute(): void {
+      const next = !audio.config.muted;
+      audio.apply({ muted: next });
+      muteStateEl.textContent = next ? 'activar sonido' : 'silenciar';
+      muteStateEl.classList.toggle('is-off', next);
+    }
+
+    function refreshNudge(): void {
+      nudgeEl.classList.toggle('is-visible', !audio.unlocked);
+    }
+
+    stage.addEventListener('pointerdown', () => {
+      if (state.phase === 'reveal') {
+        void audio.unlock().then(refreshNudge);
+        doReset();
+        return;
+      }
+      void trigger();
+    });
+
+    window.addEventListener('keydown', (event) => {
+      if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
+
+      switch (event.key) {
+        case ' ':
+        case 'Enter':
+          event.preventDefault();
+          void trigger();
+          break;
+        case 'r':
+        case 'R':
+          doReset();
+          break;
+        case 'm':
+        case 'M':
+          toggleMute();
+          break;
+        case 'Escape':
+          if (isBusy(state)) doReset();
+          break;
+        default:
+          break;
+      }
+    });
+
+    window.addEventListener('storage', (event) => {
+      if (event.key === 'tombola:participantes:v1') reloadParticipants();
+      // Cambiar canal o comando en el panel reconecta la escucha.
+      if (event.key === 'tombola:twitch:v1') startTwitch();
+    });
+
+    // mtmi no expone eventos de conexion, asi que solo podemos afirmar que
+    // pedimos escuchar. Los errores reales (Twitch cortando la conexion) solo
+    // aparecen en la consola del navegador.
+    window.addEventListener('beforeunload', disconnectTwitch);
+
+    let last = performance.now();
+    let frameErrors = 0;
+
+    function frame(now: number): void {
+      const dt = Math.min((now - last) / 1000, 0.05);
+      last = now;
+
+      // El overlay corre desatendido durante un stream: una excepcion en un
+      // frame no puede matar el bucle, asi que el siguiente frame se pide
+      // siempre en el finally.
+      try {
+        advanceDrum(state, dt, events, cryptoRandom);
+
+        if (state.phase === 'spinning') {
+          audio.updateSpin(Math.min(1, state.phaseTime / SPIN_DURATION));
+        }
+        audio.tick(state.world.agitation);
+
+        renderDrum(ctx, state, {
+          width: view.width,
+          height: view.height,
+          showLabels,
+        });
+
+        if (confetti.active) confetti.update(dt);
+        // Se dibuja SIEMPRE, incluso sin particulas: draw() limpia el canvas
+        // primero. Si se dibujara solo cuando hay confeti, al reiniciar a
+        // mitad de la animacion clear() vacia las particulas, active pasa a
+        // false y el canvas nunca se borra: queda congelado el ultimo frame
+        // con particulas pegadas en pantalla.
+        confetti.draw(fxCtx, view.width, view.height);
+      } catch (error) {
+        if (frameErrors++ < 3) console.error('[tombola] error en el frame', error);
+      } finally {
+        requestAnimationFrame(frame);
+      }
+    }
+
+    new ResizeObserver(layout).observe(stage);
+    layout();
+    loadParticipants(state, readItems(), cryptoRandom);
+    lastSignature = signatureOf(listParticipants());
+    refreshNudge();
+    startTwitch();
+    refreshStatus();
+
+    // Sondeo de respaldo por si el evento 'storage' no llega.
+    setInterval(pollParticipants, 1000);
+
+    setTimeout(() => hintEl.classList.add('is-hidden'), 8000);
+    if (params.has('help')) hintEl.classList.remove('is-hidden');
+
+    requestAnimationFrame(frame);
+  </script>
+</Base>
+
+<style is:global>
+  .overlay-body {
+    background-color: transparent;
+    overflow: hidden;
+    height: 100vh;
+    margin: 0;
+    font-family: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
+  }
+
+  .overlay-body.has-bg {
+    background: radial-gradient(circle at 50% 30%, #16204a 0%, #070b18 70%);
+  }
+
+  .stage {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    user-select: none;
+    cursor: pointer;
+  }
+
+  .layer {
+    position: absolute;
+    inset: 0;
+    display: block;
+  }
+
+  .layer-fx {
+    pointer-events: none;
+  }
+
+  .winner {
+    position: absolute;
+    left: 50%;
+    bottom: 4%;
+    transform: translateX(-50%) scale(0.92);
+    opacity: 0;
+    text-align: center;
+    pointer-events: none;
+    transition:
+      opacity 0.4s ease,
+      transform 0.55s cubic-bezier(0.22, 1.4, 0.36, 1);
+  }
+
+  .winner.is-visible {
+    opacity: 1;
+    transform: translateX(-50%) scale(1);
+  }
+
+  .winner-kicker {
+    margin: 0 0 6px;
+    font-size: clamp(13px, 1.4vw, 22px);
+    letter-spacing: 0.42em;
+    text-transform: uppercase;
+    color: #ffd479;
+    text-shadow: 0 2px 14px rgba(0, 0, 0, 0.8);
+  }
+
+  .winner-name {
+    margin: 0;
+    font-size: clamp(46px, 8.2vw, 150px);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1.02;
+    color: #fff;
+    text-shadow:
+      0 0 30px rgba(110, 168, 255, 0.9),
+      0 0 70px rgba(110, 168, 255, 0.45),
+      0 8px 38px rgba(0, 0, 0, 0.7);
+  }
+
+  .nudge {
+    position: absolute;
+    top: 3%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin: 0;
+    padding: 7px 16px;
+    border-radius: 999px;
+    background: rgba(11, 16, 32, 0.75);
+    border: 1px solid rgba(120, 150, 220, 0.3);
+    color: #c8d4f5;
+    font-size: clamp(12px, 1.1vw, 16px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.35s ease;
+  }
+
+  .nudge.is-visible {
+    opacity: 1;
+  }
+
+  /* Aviso de anotado por chat. Reemplaza al anterior en vez de apilarse, para
+     que 200 entradas seguidas no tapen el overlay. */
+  .joined {
+    position: absolute;
+    right: 2.5%;
+    bottom: 2.5%;
+    margin: 0;
+    padding: 8px 18px;
+    border-radius: 999px;
+    background: rgba(11, 16, 32, 0.78);
+    border: 1px solid rgba(82, 227, 155, 0.45);
+    color: #b8f5d6;
+    font-size: clamp(13px, 1.3vw, 19px);
+    font-weight: 600;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(8px);
+    transition:
+      opacity 0.28s ease,
+      transform 0.28s ease;
+  }
+
+  .joined.is-visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  /* Solo se muestra con ?ui: en vivo puede quedar tapada por el escritorio. */
+  .status {
+    position: absolute;
+    left: 2%;
+    top: 3%;
+    margin: 0;
+    color: rgba(220, 230, 255, 0.55);
+    font-size: clamp(11px, 1vw, 15px);
+    pointer-events: none;
+  }
+
+  .status:empty {
+    display: none;
+  }
+
+  .hint {
+    position: absolute;
+    left: 2%;
+    bottom: 2.5%;
+    margin: 0;
+    color: rgba(220, 230, 255, 0.6);
+    font-size: clamp(11px, 1vw, 15px);
+    pointer-events: none;
+    opacity: 1;
+    transition: opacity 0.6s ease;
+  }
+
+  .hint.is-hidden {
+    opacity: 0;
+  }
+
+  .hint kbd {
+    background: rgba(11, 16, 32, 0.7);
+    border: 1px solid rgba(140, 170, 230, 0.3);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-size: 0.9em;
+  }
+
+  #mute-state.is-off {
+    color: #ff9b9b;
+  }
+</style>

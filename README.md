@@ -74,10 +74,11 @@ En `/control`, la sección **Historial de sorteos** guarda los últimos 50 ganad
 Se puede borrar todo el historial o quitar un registro suelto con su botón
 *Quitar*.
 
-La sección **Mantenimiento** tiene el botón *Limpiar datos de la página*: borra
+La sección **Mantenimiento** tiene el botón *Borrar todo ahora, sin confirmar*: borra
 todo lo que la app guarda en ese navegador (participantes, historial,
-configuración de Twitch y la preferencia de datos de prueba) y recarga la
-página. Es lo que conviene usar si algo quedó trabado.
+configuración de Twitch y la preferencia de datos de prueba) y recarga la página.
+Es lo que conviene usar si algo quedó trabado. **No pide confirmación ni se puede
+deshacer**, así que el aviso está en el propio botón.
 
 ## Desarrollo
 

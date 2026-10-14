@@ -32,7 +32,7 @@ import '../styles/app.css';
         </label>
       </div>
 
-      <div class="grid grid-2">
+      <div class="grid grid-2" style="margin-bottom: 14px;">
         <div>
           <label for="twitch-channel">Canal</label>
           <input id="twitch-channel" type="text" placeholder="mi_canal" autocomplete="off" />
@@ -43,10 +43,12 @@ import '../styles/app.css';
         </div>
       </div>
 
-      <p class="muted" style="margin-bottom: 0; font-size: 0.85rem;">
-        Sin token ni cuenta: mtmi se conecta de forma anónima al IRC de Twitch en modo lectura.
-        Guarda los cambios y recarga la fuente del overlay en OBS para que los tome.
-      </p>
+      <div class="row" style="margin-bottom: 14px;">
+        <label class="check" for="twitch-subs-only">
+          <input id="twitch-subs-only" type="checkbox" />
+          <span>Solo suscriptores del canal</span>
+        </label>
+      </div>
     </section>
 
     <section class="card" style="margin-bottom: 16px;">
@@ -170,8 +172,10 @@ import '../styles/app.css';
       <p class="muted" style="margin-top: 0;">
         Borra todo lo que la app guarda en este navegador: participantes, historial, configuración de
         Twitch y la preferencia de datos de prueba. La página se recarga y arranca de cero.
+        <strong>No pide confirmación y no se puede deshacer.</strong> Es lo que conviene usar si
+        algo quedó trabado.
       </p>
-      <button id="clear-cache" class="danger" type="button">Limpiar datos de la página</button>
+      <button id="clear-cache" class="danger" type="button">Borrar todo ahora, sin confirmar</button>
     </section>
   </div>
 
@@ -352,13 +356,10 @@ import '../styles/app.css';
     });
 
     byId<HTMLButtonElement>('clear-cache').addEventListener('click', () => {
-      if (
-        !confirm(
-          'Se borra TODO lo guardado en este navegador: participantes, historial, configuración de Twitch y datos de prueba. ¿Deseas continuar?',
-        )
-      ) {
-        return;
-      }
+      // A proposito sin confirmacion: es la accion de mantenimiento para
+      // destrabar la pagina cuando algo quedo a medias, y el confirm la
+      // convertia en un paso extra para el uso principal. La irreversibleidad
+      // queda escrita en el boton y en el texto de arriba.
       clearEverything();
       location.reload();
     });
@@ -398,7 +399,6 @@ import '../styles/app.css';
     });
 
     byId<HTMLButtonElement>('clear-all').addEventListener('click', () => {
-      if (!confirm('Esto borra todos los participantes de este navegador. ¿Deseas continuar?')) return;
       clearParticipants();
       list = [];
       render();
@@ -422,6 +422,7 @@ import '../styles/app.css';
     const twitchEnabledEl = byId<HTMLInputElement>('twitch-enabled');
     const twitchChannelEl = byId<HTMLInputElement>('twitch-channel');
     const twitchCommandEl = byId<HTMLInputElement>('twitch-command');
+    const twitchSubsOnlyEl = byId<HTMLInputElement>('twitch-subs-only');
     const commandPreviewEl = byId<HTMLElement>('command-preview');
 
     function loadTwitchForm(): void {
@@ -429,6 +430,7 @@ import '../styles/app.css';
       twitchEnabledEl.checked = cfg.enabled;
       twitchChannelEl.value = cfg.channel;
       twitchCommandEl.value = cfg.command;
+      twitchSubsOnlyEl.checked = cfg.subscribersOnly;
       commandPreviewEl.textContent = cfg.command;
     }
 
@@ -437,6 +439,7 @@ import '../styles/app.css';
         enabled: twitchEnabledEl.checked,
         channel: twitchChannelEl.value.trim().toLowerCase(),
         command: twitchCommandEl.value.trim(),
+        subscribersOnly: twitchSubsOnlyEl.checked,
       });
       // La config se normaliza al guardar (un comando vacio vuelve al
       // default), asi que se refleja en el formulario lo que quedo guardado.
@@ -444,7 +447,7 @@ import '../styles/app.css';
       commandPreviewEl.textContent = cfg.command;
     }
 
-    for (const el of [twitchEnabledEl, twitchChannelEl, twitchCommandEl]) {
+    for (const el of [twitchEnabledEl, twitchChannelEl, twitchCommandEl, twitchSubsOnlyEl]) {
       el.addEventListener('change', saveTwitchForm);
     }
     loadTwitchForm();

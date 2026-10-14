@@ -6,6 +6,22 @@ de UI: todo el bundle es TypeScript plano sobre `<canvas>`.
 `README.md` tiene la guía de uso y de montaje en OBS. Acá va lo que **no** se deduce
 leyendo el código.
 
+## Reglas duras
+
+- **Nunca levantes un dev server.** Ni `npm run dev`, ni en background, ni "un
+  segundo nomás para ver cómo queda". Para verificar cambios usá `npm run build`,
+  `npm test` y `npm run check`, que no dejan procesos colgados. Si una tarea parece
+  necesitar el server, decilo y que lo decida la persona.
+- **No corras `npm run smoke`** ni `npm run test:browser` salvo que te lo pidan
+  explícitamente: ambos tardan mucho (smoke además nunca termina solo) y el de
+  navegador abre Edge.
+- **No toques los textos de la interfaz** (labels, parrafos, mensajes) salvo que
+  mantengan un bug o un error de verdad. La persona los edita a mano y acorta
+  las explicaciones; si un texto falta o "parece" incompleto, es decisión
+  deliberada, no un olvido. No los reconstruyas, no los "arregles" y no agregues
+  notas explicativas por tu cuenta.
+- No commitees ni pushees sin que te lo pidan explícitamente.
+
 ## Comandos
 
 ```sh
@@ -77,6 +93,21 @@ la posición final de la simulación para decidir el resultado: la física produ
 por acumulación en los bordes. Para tests, `rng.ts` exporta `seededRandom` (mulberry32)
 y **todas** las funciones aceptan un `RandomSource` inyectable — usalo en vez de
 mockear `Math.random`.
+
+### Límite conocido del solver
+
+`physics.ts` es un solver de impulsos secuenciales **sin warm starting**. Con una
+pila de 200 bolas no converge del todo: quedan ~97 px/s de jitter y solo una
+fracción duerme. Hasta ~10 bolas se asientan de verdad. Medido: con la corrección
+posicional desactivada el residuo cae a 0.7 px/s, o sea que toda esa energía
+viene de los huecos que abre la corrección.
+
+`SLEEP_SPEED = 90` parece un error y no lo es: es el umbral contra el jitter,
+y lo que lo hace seguro es el flag `supported`. Si tocás una de las dos cosas,
+corré los tests de `physics` antes de dar por buena cualquier otra cosa.
+
+Es el punto donde matter-js (o implementar warm starting) se justificaría: el
+apilado estable de una librería madura es justo lo que no nos da el código propio.
 
 ## Contrato entre /control y /overlay
 

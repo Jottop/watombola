@@ -51,7 +51,13 @@ import Base from '../layouts/Base.astro';
     import { cryptoRandom } from '../lib/rng';
     import { AudioEngine } from '../lib/audio';
     import { Confetti } from '../lib/confetti';
-    import { connectTwitch, disconnectTwitch, twitchEntriesSoFar } from '../lib/twitch';
+    import {
+      connectTwitch,
+      disconnectTwitch,
+      forgetMissingParticipants,
+      twitchEntriesSoFar,
+      twitchRejectedSoFar,
+    } from '../lib/twitch';
 
     /** Si el markup y el script se desincronizan, que lo diga claro en vez de
      *  fallar mas adelante con un null en un sitio inexplicable. */
@@ -120,9 +126,17 @@ import Base from '../layouts/Base.astro';
       if (!params.has('ui')) return;
       const cfg = readTwitchConfig();
       const listening = cfg.enabled && cfg.channel !== '';
-      statusEl.textContent = listening
-        ? `Escuchando #${cfg.channel} · ${cfg.command} · ${state.world.balls.length} anotados (${twitchEntriesSoFar()} por chat)`
-        : `Twitch apagado · ${state.world.balls.length} participantes`;
+      if (!listening) {
+        statusEl.textContent = `Twitch apagado · ${state.world.balls.length} participantes`;
+        return;
+      }
+      // Con el filtro de suscriptores activo mostramos tambien cuantos quedaron
+      // afuera: si no, no hay forma de saber si el filtro esta funcionando o si
+      // simplemente nadie mas escribio el comando.
+      const rejected = cfg.subscribersOnly ? ` · ${twitchRejectedSoFar()} sin suscripción` : '';
+      statusEl.textContent =
+        `Escuchando #${cfg.channel} · ${cfg.command} · ${state.world.balls.length} anotados` +
+        ` (${twitchEntriesSoFar()} por chat${rejected})`;
     }
 
     /** Alguien escribio el comando en el chat de Twitch. */
@@ -175,9 +189,11 @@ import Base from '../layouts/Base.astro';
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       fxCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      const R = Math.max(90, Math.min(width * 0.28, height * 0.33, 420));
+      const R = Math.max(90, Math.min(width * 0.27, height * 0.31, 400));
       const cx = width / 2;
-      const cy = height * 0.42;
+      // El bombo va subido para dejarle aire a la base y al cartel del ganador:
+      // antes el pedestal y el nombre se pisaban en 1080p.
+      const cy = height * 0.38;
       const changed = Math.abs(state.world.R - R) > 0.5;
 
       resizeWorld(state.world, cx, cy, R);
@@ -252,6 +268,9 @@ import Base from '../layouts/Base.astro';
       const signature = signatureOf(list);
       if (signature === lastSignature) return;
       lastSignature = signature;
+      // Solo cuando la lista cambio de verdad. Podar en cada vuelta haria que
+      // uno que insiste con la tombola llena se re procesara todo el tiempo.
+      forgetMissingParticipants();
       reloadParticipants(list);
     }
 
@@ -311,7 +330,12 @@ import Base from '../layouts/Base.astro';
     });
 
     window.addEventListener('storage', (event) => {
-      if (event.key === 'tombola:participantes:v1') reloadParticipants();
+      if (event.key === 'tombola:participantes:v1') {
+        // La lista cambio: hay que soltar los ids cacheados de chat que ya no
+        // estan, o el que se borro del panel no vuelve a poder entrar.
+        forgetMissingParticipants();
+        reloadParticipants();
+      }
       // Cambiar canal o comando en el panel reconecta la escucha.
       if (event.key === 'tombola:twitch:v1') startTwitch();
     });
@@ -412,11 +436,22 @@ import Base from '../layouts/Base.astro';
   .winner {
     position: absolute;
     left: 50%;
-    bottom: 4%;
-    transform: translateX(-50%) scale(0.92);
+    bottom: 3%;
+    transform: translateX(-50%) scale(0.94);
     opacity: 0;
     text-align: center;
     pointer-events: none;
+    padding: 1.1rem 3rem 1.3rem;
+    border-radius: 1.4rem;
+    /* El cartel va sobre el video del stream: sin fondo casi opaco el texto
+       se pierde contra cualquier escena clara. */
+    background:
+      radial-gradient(120% 160% at 50% 0%, rgba(28, 40, 78, 0.82) 0%, rgba(9, 13, 28, 0.9) 70%);
+    border: 1px solid rgba(255, 212, 121, 0.34);
+    box-shadow:
+      0 24px 70px rgba(0, 0, 0, 0.55),
+      inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(8px);
     transition:
       opacity 0.4s ease,
       transform 0.55s cubic-bezier(0.22, 1.4, 0.36, 1);
@@ -428,25 +463,31 @@ import Base from '../layouts/Base.astro';
   }
 
   .winner-kicker {
-    margin: 0 0 6px;
-    font-size: clamp(13px, 1.4vw, 22px);
-    letter-spacing: 0.42em;
+    margin: 0 0 0.35rem;
+    font-size: clamp(11px, 1.1vw, 17px);
+    letter-spacing: 0.46em;
+    text-indent: 0.46em;
     text-transform: uppercase;
+    font-weight: 600;
     color: #ffd479;
     text-shadow: 0 2px 14px rgba(0, 0, 0, 0.8);
   }
 
   .winner-name {
     margin: 0;
-    font-size: clamp(46px, 8.2vw, 150px);
-    font-weight: 800;
-    letter-spacing: -0.02em;
-    line-height: 1.02;
-    color: #fff;
+    /* Sin hyphens ni balanceo: los nombres propios se parten mal y una linea
+       rota entre palabras parece un error de maquetacion. */
+    font-size: clamp(38px, 5.6vw, 104px);
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    line-height: 1.06;
+    color: #f4f7ff;
+    text-wrap: balance;
+    max-width: 22ch;
+    margin-inline: auto;
     text-shadow:
-      0 0 30px rgba(110, 168, 255, 0.9),
-      0 0 70px rgba(110, 168, 255, 0.45),
-      0 8px 38px rgba(0, 0, 0, 0.7);
+      0 0 26px rgba(150, 190, 255, 0.42),
+      0 10px 40px rgba(0, 0, 0, 0.75);
   }
 
   .nudge {

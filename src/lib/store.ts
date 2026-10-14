@@ -156,12 +156,15 @@ export interface TwitchConfig {
   enabled: boolean;
   channel: string;
   command: string;
+  /** Si esta activo, solo pueden entrar por chat los suscriptores del canal. */
+  subscribersOnly: boolean;
 }
 
 export const DEFAULT_TWITCH_CONFIG: TwitchConfig = {
   enabled: false,
   channel: '',
   command: '!entrar',
+  subscribersOnly: false,
 };
 
 function normalizeTwitchConfig(raw: unknown): TwitchConfig {
@@ -172,6 +175,10 @@ function normalizeTwitchConfig(raw: unknown): TwitchConfig {
     enabled: typeof cfg.enabled === 'boolean' ? cfg.enabled : DEFAULT_TWITCH_CONFIG.enabled,
     channel: typeof cfg.channel === 'string' ? cfg.channel.trim() : DEFAULT_TWITCH_CONFIG.channel,
     command: command || DEFAULT_TWITCH_CONFIG.command,
+    subscribersOnly:
+      typeof cfg.subscribersOnly === 'boolean'
+        ? cfg.subscribersOnly
+        : DEFAULT_TWITCH_CONFIG.subscribersOnly,
   };
 }
 

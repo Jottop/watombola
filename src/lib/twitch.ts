@@ -1,6 +1,14 @@
 import { client } from 'mtmi';
 import { listParticipants, type TwitchConfig } from './store';
-import { buildEntry, type EntryCandidate, type TwitchMessageLike } from './twitch-command';
+import {
+  buildEntry,
+  hasSubscriberBadge,
+  isChannelOwner,
+  parseEntryCommand,
+  pruneKnown,
+  type EntryCandidate,
+  type TwitchMessageLike,
+} from './twitch-command';
 
 /**
  * mtmi corre en el navegador: se conecta por WebSocket al IRC de Twitch de
@@ -29,6 +37,8 @@ interface Session {
   handlers: TwitchHandlers;
   known: Set<string>;
   entries: number;
+  /** Cuantos escribieron el comando y quedaron afuera por no ser suscriptores. */
+  rejected: number;
 }
 
 let session: Session | null = null;
@@ -42,12 +52,25 @@ function ensureListener(): void {
     const current = session;
     if (!current) return;
 
-    const candidate = buildEntry(
-      raw as TwitchMessageLike,
-      current.config.command,
-      current.known,
-    );
-    if (!candidate) return;
+    const event = raw as TwitchMessageLike;
+    const candidate = buildEntry(event, current.config.command, current.known, {
+      subscribersOnly: current.config.subscribersOnly,
+    });
+    if (!candidate) {
+      // mtmi no dice por que lo rechazo. Reconstruimos el caso "escribio el
+      // comando pero no es suscriptor" para poder contarlo en la linea de
+      // estado: si no, un filtro activo parece no hacer nada.
+      if (
+        current.config.subscribersOnly &&
+        parseEntryCommand(event.message ?? '', current.config.command) &&
+        !event.userInfo?.isBot &&
+        !isChannelOwner(event) &&
+        !hasSubscriberBadge(event)
+      ) {
+        current.rejected += 1;
+      }
+      return;
+    }
 
     current.known.add(candidate.userId);
     current.entries += 1;
@@ -57,6 +80,16 @@ function ensureListener(): void {
 
 function knownFromStore(): Set<string> {
   return new Set(listParticipants().map((p) => p.id));
+}
+
+/**
+ * Sincroniza el conjunto en memoria contra la lista real. Hay que llamarla cada
+ * vez que cambian los participantes: si no, a alguien que se borra del panel le
+ * queda el id cacheado y no vuelve a poder entrar por chat en toda la sesion.
+ */
+export function forgetMissingParticipants(): void {
+  if (!session) return;
+  pruneKnown(session.known, knownFromStore());
 }
 
 /** Arranca (o cambia de canal) la escucha. Devuelve una funcion para cortarla. */
@@ -69,7 +102,7 @@ export function connectTwitch(
 
   if (!config.enabled || !config.channel) return () => {};
 
-  session = { config, handlers, known: knownFromStore(), entries: 0 };
+  session = { config, handlers, known: knownFromStore(), entries: 0, rejected: 0 };
 
   client.connect({
     channels: [config.channel.toLowerCase()],
@@ -100,4 +133,9 @@ export function isTwitchListening(): boolean {
 
 export function twitchEntriesSoFar(): number {
   return session?.entries ?? 0;
+}
+
+/** Cuantos quedaron afuera por el filtro de suscriptores en esta sesion. */
+export function twitchRejectedSoFar(): number {
+  return session?.rejected ?? 0;
 }

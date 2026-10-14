@@ -40,6 +40,7 @@ const ctx2d = {
   closePath() {},
   clip() {},
   arc() {},
+  ellipse() {},
   rect() {},
   roundRect() {},
   fill() {},

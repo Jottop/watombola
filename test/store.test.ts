@@ -166,6 +166,42 @@ describe('config de twitch', () => {
   it('descarta un comando vacio', () => {
     expect(writeTwitchConfig({ command: '   ' }).command).toBe('!entrar');
   });
+
+  it('guarda y relee el filtro de suscriptores', () => {
+    expect(writeTwitchConfig({ subscribersOnly: true }).subscribersOnly).toBe(true);
+    expect(readTwitchConfig().subscribersOnly).toBe(true);
+    expect(writeTwitchConfig({ subscribersOnly: false }).subscribersOnly).toBe(false);
+  });
+
+  it('el filtro no pisa los demas campos al cambiarlo', () => {
+    writeTwitchConfig({ enabled: true, channel: 'canalito', command: '!entro' });
+    writeTwitchConfig({ subscribersOnly: true });
+
+    const cfg = readTwitchConfig();
+    expect(cfg.enabled).toBe(true);
+    expect(cfg.channel).toBe('canalito');
+    expect(cfg.command).toBe('!entro');
+  });
+
+  it('una config vieja sin el campo queda con el filtro apagado', () => {
+    // Guardada por una version anterior: el campo no existe y no debe romper.
+    localStorage.setItem(
+      'tombola:twitch:v1',
+      JSON.stringify({ enabled: true, channel: 'canalito', command: '!entrar' }),
+    );
+
+    const cfg = readTwitchConfig();
+    expect(cfg.subscribersOnly).toBe(false);
+    expect(cfg.channel).toBe('canalito');
+  });
+
+  it('un filtro con tipo raro cae al default', () => {
+    localStorage.setItem(
+      'tombola:twitch:v1',
+      JSON.stringify({ enabled: true, channel: 'c', command: '!entrar', subscribersOnly: 'si' }),
+    );
+    expect(readTwitchConfig().subscribersOnly).toBe(false);
+  });
 });
 
 describe('historial de sorteos', () => {

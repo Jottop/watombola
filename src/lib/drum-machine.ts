@@ -1,4 +1,4 @@
-import { advanceWorld, addBall, createWorld, populate, type Ball, type World } from './physics';
+﻿import { advanceWorld, addBall, createWorld, populate, type Ball, type World } from './physics';
 import { cryptoRandom, randomInt, shuffle, type RandomSource } from './rng';
 import type { ParticipantItem } from './types';
 
@@ -65,8 +65,8 @@ function setPhase(state: DrumState, next: Phase, events: DrumEvents): void {
   events.onPhaseChange?.(next, previous);
 }
 
-/** Mientras el bombo gira no se tocan las bolas. En reveal sí se puede: el
- *  ganador ya está en el DOM y no depende del array de bolas. */
+/** Mientras el bombo gira no se tocan las bolas. En reveal sÃ­ se puede: el
+ *  ganador ya estÃ¡ en el DOM y no depende del array de bolas. */
 export function isDrumAnimating(state: DrumState): boolean {
   return state.phase === 'spinning' || state.phase === 'ejecting';
 }
@@ -82,8 +82,8 @@ export function loadParticipants(
   state.ejectAt.fill(-1);
 
   if (state.phase === 'reveal') {
-    // La bola grande se neutraliza: winnerIndex apuntaría a un índice
-    // cualquiera de la lista nueva y mostraría el nombre equivocado. El
+    // La bola grande se neutraliza: winnerIndex apuntarÃ­a a un Ã­ndice
+    // cualquiera de la lista nueva y mostrarÃ­a el nombre equivocado. El
     // ganador sigue visible en el DOM, que es donde vive de verdad.
     state.winnerIndex = -1;
     state.revealProgress = 0;
@@ -95,7 +95,7 @@ export function loadParticipants(
 }
 
 /**
- * El ganador se sortea acá con entropia criptografica, NO con la fisica.
+ * El ganador se sortea acÃ¡ con entropia criptografica, NO con la fisica.
  * Dejarlo en manos de la simulacion introduciria sesgo (las bolas se
  * acumulan en los bordes), y ademas seria imposible de auditar.
  */
@@ -120,6 +120,9 @@ export function startDraw(
   state.revealFired = false;
   state.revealProgress = 0;
   state.world.agitation = 0;
+  // Por si se arranca un sorteo sin pasar por resetDrum: ninguna bola arranca
+  // marcada como salida.
+  for (const ball of state.world.balls) ball.gone = false;
 
   setPhase(state, 'spinning', events);
   return true;
@@ -228,7 +231,27 @@ export function advanceDrum(
   state.world.agitation = agitationFor(state.phase, state.phaseTime);
 
   advanceWorld(state.world, dt, rand);
+  markEjected(state);
   tick(state, events);
+}
+
+/**
+ * Saca de la simulacion a las bolas que ya terminaron de salir.
+ *
+ * Ojo con esto: el renderer las deja de dibujar cuando el progreso llega a 1,
+ * pero mientras sigan en `world.balls` siguen empujando a las demas. El hueco de
+ * una eyeccion nunca se abria, y las que quedaban no tenian donde reacomodarse:
+ * quedaban colgando en el aire, sostenidas por bolas que ya no se venian.
+ *
+ * Va DESPUES de advanceWorld a proposito: durante el frame en que termina de
+ * salir, la bola todavia colisiona como siempre.
+ */
+function markEjected(state: DrumState): void {
+  for (let i = 0; i < state.world.balls.length; i++) {
+    const ball = state.world.balls[i]!;
+    if (ball.gone) continue;
+    if (ejectProgressOf(state, i) >= 1) ball.gone = true;
+  }
 }
 
 /** -1 = la bola sigue en el bombo. 0..1 = progreso de salida. 1 = ya salio. */

@@ -1,4 +1,4 @@
-import { shuffle, type RandomSource } from './rng';
+﻿import { shuffle, type RandomSource } from './rng';
 import type { ParticipantItem } from './types';
 
 const TAU = Math.PI * 2;
@@ -11,6 +11,24 @@ const TANGENTIAL_FRICTION = 0.22;
 const MAX_SPEED = 3200;
 const SHAKE_INTERVAL = 0.07;
 const SHAKE_STRENGTH = 620;
+
+/**
+ * Reparto de la sacudida: cuanto es ruido y cuanto es giro con el tambor.
+ * El ruido solo desordena; la parte tangencial es la que hace girar el interior
+ * de la pila, que la friccion del muro no alcanza.
+ */
+/**
+ * Reparto de la sacudida: cuanto es ruido y cuanto es giro con el tambor.
+ * El ruido solo desordena; la parte tangencial es la que hace girar el interior
+ * de la pila, que la friccion del muro no alcanza.
+ *
+ * Medido con 57 bolas: sin la parte tangencial el interior queda a 184 px/s
+ * contra 478 de las del borde, y se ve ordenado. Con 20 la relacion se empareja
+ * (531 contra 782) y el bombo se ve movido de verdad. Subirlo mas ya no aporta
+ * desorden: a 35 las bolas van tan rapido que se pierde la lectura.
+ */
+const SHAKE_FRACTION = 0.3;
+const SHAKE_SWIRL = 36;
 const PACKING = 0.5;
 
 /**
@@ -129,7 +147,7 @@ export interface Ball {
   /** Cuanto lleva quieta, en segundos de reloj. Llega a SLEEP_DELAY y se congela. */
   still: number;
   /**
-   * Algo la esta sosteniendo ahora mismo: un impulso normal al menos capaz de
+   * Alguien la esta sosteniendo ahora mismo: un impulso normal al menos capaz de
    * cancelar su peso en un subpaso. Lo recalcula el solver en cada paso.
    *
    * Sin esto no hay forma de distinguir "una bola que ya se asento" de "una
@@ -137,6 +155,14 @@ export interface Ball {
    * dormir la segunda la dejaria flotando en el aire del bombo.
    */
   supported: boolean;
+  /**
+   * Ya salio del bombo y no participa mas de la simulacion.
+   *
+   * El renderer deja de dibujarla, pero mientras siga en `world.balls` sigue
+   * ocupando espacio y empujando a las demas: el hueco de una eyeccion nunca se
+   * abria y las que quedaban no se reacomodaban.
+   */
+  gone: boolean;
   r: number;
   hue: number;
   /** Reloj global en que la bola entro; se usa para la animacion de aparicion. */
@@ -188,7 +214,7 @@ export function createWorld(cx: number, cy: number, R: number, maxBalls = 200): 
     balls: [],
     maxBalls,
     agitation: 0,
-    spinRate: 2.6,
+    spinRate: 4.6,
     spinPhase: 0,
     shakeTimer: SHAKE_INTERVAL,
     grid: makeGrid(R, maxBalls),
@@ -197,7 +223,7 @@ export function createWorld(cx: number, cy: number, R: number, maxBalls = 200): 
 
 /** Reubica el bombo y reconstruye la rejilla, que depende del radio.
  *  Ojo: el buffer de items se dimensiona con maxBalls. Si usara balls.length,
- *  un resize antes de poblar dejaría el buffer en 1 y el solver descartaría
+ *  un resize antes de poblar dejarÃ­a el buffer en 1 y el solver descartarÃ­a
  *  silenciosamente casi todas las bolas (Int32Array ignora escrituras fuera
  *  de rango), dejando el bombo sin colisiones. */
 export function resizeWorld(world: World, cx: number, cy: number, R: number): void {
@@ -214,7 +240,7 @@ export function ballRadiusFor(count: number, R: number): number {
   return clamp(R * Math.sqrt(PACKING / count), MIN_BALL_R, MAX_BALL_R);
 }
 
-/** Retícula hexagonal dentro del círculo: densidad ~0.9, sin posiciones repetidas. */
+/** RetÃ­cula hexagonal dentro del cÃ­rculo: densidad ~0.9, sin posiciones repetidas. */
 function latticeSlots(world: World, r: number): { x: number; y: number }[] {
   const maxD = Math.max(0, world.R - r);
   const spacing = r * 2.04;
@@ -261,7 +287,7 @@ export function populate(world: World, items: readonly ParticipantItem[], rand: 
     return;
   }
 
-  // Si la retícula no alcanza para todos los participantes, achicamos las
+  // Si la retÃ­cula no alcanza para todos los participantes, achicamos las
   // bolas en vez de reciclar posiciones: dos bolas naciendo en el mismo
   // punto producen un solapamiento que el solver tarda segundos en digerir.
   let r = ballRadiusFor(n, world.R);
@@ -289,6 +315,7 @@ export function populate(world: World, items: readonly ParticipantItem[], rand: 
       spin: 0,
       still: 0,
       supported: false,
+      gone: false,
       r,
       hue: (i * 137.508) % 360,
       spawnAt: 0,
@@ -361,6 +388,7 @@ export function addBall(
     spin: 0,
     still: 0,
     supported: false,
+    gone: false,
     r: target,
     hue: (world.balls.length * 137.508) % 360,
     spawnAt: changed ? clock - SPAWN_DURATION : clock,
@@ -379,18 +407,32 @@ export function spawnProgressOf(ball: Ball, clock: number): number {
  * Sacudida residual.
  *
  * Antes esto era TODO el movimiento del bombo: impulsos aleatorios en cada
- * direccion, que se ven como un temblor sin causa. Ahora el giro lo produce la
- * friccion contra el muro (`wallFriction`) y el arrastre de la gravedad; lo que
- * queda aca es solo ruido pequeno, para desempatar bolas que quedaron
- * trabadas en una posicion simetrica.
+ * direccion, que se ven como un temblor sin causa. Ahora el giro principal lo
+ * produce la friccion contra el muro (`wallFriction`).
+ *
+ * Pero esa friccion solo alcanza a las bolas que TOCAN el muro, y son pocas:
+ * con 57 participantes apenas 11 lo hacen. El resto queda apilada en el fondo y
+ * se mueve a la mitad de velocidad, asi que el bombo se ve ordenado por
+ * dentro. Esta sacudida es lo unico que llega a todas, asi que su componente
+ * tangencial es la que hace girar el interior con el tambor.
  */
 function shake(world: World, rand: RandomSource): void {
   const power = SHAKE_STRENGTH * world.agitation;
+  const spin = world.spinRate * world.agitation * SHAKE_SWIRL;
   for (const b of world.balls) {
+    if (b.gone) continue;
+    const dx = b.x - world.cx;
+    const dy = b.y - world.cy;
+    const d = Math.hypot(dx, dy) || 1;
+    const tx = -dy / d;
+    const ty = dx / d;
+    const tangent = spin * (0.4 + rand() * 0.9);
+
     const angle = rand() * TAU;
-    const mag = power * (0.4 + rand() * 0.9) * 0.22;
-    b.vx += Math.cos(angle) * mag;
-    b.vy += Math.sin(angle) * mag;
+    const mag = power * (0.4 + rand() * 0.9) * SHAKE_FRACTION;
+
+    b.vx += Math.cos(angle) * mag + tx * tangent;
+    b.vy += Math.sin(angle) * mag + ty * tangent;
     b.still = 0;
   }
 }
@@ -399,6 +441,7 @@ function integrate(world: World, dt: number): void {
   const dragK = Math.max(0, 1 - DRAG * dt);
 
   for (const b of world.balls) {
+    if (b.gone) continue;
     b.vy += GRAVITY * dt;
     b.vx *= dragK;
     b.vy *= dragK;
@@ -465,6 +508,7 @@ function constrainToWalls(world: World, omega: number): void {
   const { balls, cx, cy, R } = world;
 
   for (const b of balls) {
+    if (b.gone) continue;
     const dx = b.x - cx;
     const dy = b.y - cy;
     const d = Math.hypot(dx, dy);
@@ -521,7 +565,10 @@ function buildGrid(world: World): void {
   const cells = g.cols * g.cols;
   g.counts.fill(0);
 
-  for (const b of world.balls) g.counts[cellIndex(b, world, g)]! += 1;
+  for (const b of world.balls) {
+    if (b.gone) continue;
+    g.counts[cellIndex(b, world, g)]! += 1;
+  }
 
   let sum = 0;
   for (let c = 0; c < cells; c++) {
@@ -532,7 +579,9 @@ function buildGrid(world: World): void {
   g.counts[cells] = sum;
 
   for (let i = world.balls.length - 1; i >= 0; i--) {
-    const c = cellIndex(world.balls[i]!, world, g);
+    const ball = world.balls[i]!;
+    if (ball.gone) continue;
+    const c = cellIndex(ball, world, g);
     g.counts[c]! -= 1;
     g.items[g.counts[c]!] = i;
   }
@@ -654,6 +703,9 @@ function resolveCollisions(world: World): void {
 
   for (let i = 0; i < balls.length; i++) {
     const a = balls[i]!;
+    // Las que ya salieron ni se consultan. Las demas tampoco las encountera
+    // nadie: buildGrid no las mete en la rejilla, asi que `j` nunca es una.
+    if (a.gone) continue;
     const rawX = ((a.x - world.cx + world.R) / g.cellSize) | 0;
     const rawY = ((a.y - world.cy + world.R) / g.cellSize) | 0;
 
@@ -689,7 +741,10 @@ export function advanceWorld(world: World, dt: number, rand: RandomSource): void
 
   // El solver recalcula `supported` desde cero en cada paso; el frame arranca
   // limpiandolo para que no contamine lo que quedo del anterior.
-  for (const b of world.balls) b.supported = false;
+  for (const b of world.balls) {
+    if (b.gone) continue;
+    b.supported = false;
+  }
 
   let remaining = Math.min(dt, 0.25);
   while (remaining > 0) {
@@ -715,6 +770,7 @@ export function advanceWorld(world: World, dt: number, rand: RandomSource): void
   // lento va por debajo de SLEEP_SPEED igual que una asentada, asi que sin el
   // flag `supported` se congelaria a media caida y quedaria flotando.
   for (const b of world.balls) {
+    if (b.gone) continue;
     if (
       !b.supported ||
       b.vx * b.vx + b.vy * b.vy > SLEEP_SPEED * SLEEP_SPEED ||
@@ -743,6 +799,7 @@ export function resolveCollisionsNow(world: World): void {
 export function kineticEnergy(world: World): number {
   let total = 0;
   for (const b of world.balls) {
+    if (b.gone) continue;
     const m = b.r * b.r;
     // Traslacional + rotacional (0.5 * I * w^2 con I = (2/5) m r^2).
     total += 0.5 * m * (b.vx * b.vx + b.vy * b.vy) + 0.2 * m * b.r * b.r * b.spin * b.spin;

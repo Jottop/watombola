@@ -208,6 +208,60 @@ describe('giro del bombo', () => {
     }
     expect(pegadas).toBeLessThan(world.balls.length / 2);
   });
+
+  it('el interior de la pila tambien se mueve', () => {
+    // El arrastre por friccion solo alcanza a las bolas que TOCAN el muro, y
+    // son pocas: con 57 participantes unas 11. Sin la componente tangencial de
+    // la sacudida el resto queda apilada yendo a la mitad de velocidad, y el
+    // bombo se ve ordenado por dentro. Medido: 184 px/s sin ella, ~530 con ella.
+    const world = createWorld(0, 0, 335, 60);
+    populate(world, items(57), seededRandom(7));
+    run(world, 300, 1);
+
+    let interior = 0;
+    let speed = 0;
+    for (const b of world.balls) {
+      if (Math.hypot(b.x, b.y) + b.r >= world.R - 1.5) continue;
+      interior += 1;
+      speed += Math.hypot(b.vx, b.vy);
+    }
+
+    expect(interior).toBeGreaterThan(10);
+    expect(speed / interior).toBeGreaterThan(250);
+  });
+
+  it('con pocas bolas el bombo no queda apilado en el fondo', () => {
+    // Regresion visual: con pocas bolas quedaban amontonadas abajo y el
+    // circulo de arriba vacio. Se mide la altura media respecto del centro
+    // (0 = centro del bombo, 1 = fondo). Medido: 0.29 con la sacudida chica,
+    // 0.01 con la actual.
+    const world = createWorld(0, 0, 335, 60);
+    populate(world, items(5), seededRandom(7));
+    run(world, 400, 1);
+
+    let height = 0;
+    for (const b of world.balls) height += (b.y - world.cy) / world.R;
+    height /= world.balls.length;
+
+    expect(height).toBeLessThan(0.15);
+  });
+
+  it('el movimiento no depende de cuantas bolas haya', () => {
+    // Con la config anterior, 5 bolas iban a 250 px/s y 57 a 580: el bombo se
+    // veia vacio y quieto con poca gente, y desquilibrado con mucha.
+    const mean = (n: number): number => {
+      const world = createWorld(0, 0, 335, 200);
+      populate(world, items(n), seededRandom(7));
+      run(world, 300, 1);
+      return (
+        world.balls.reduce((s, b) => s + Math.hypot(b.vx, b.vy), 0) / world.balls.length
+      );
+    };
+
+    const pocos = mean(5);
+    const muchos = mean(57);
+    expect(Math.abs(muchos / pocos)).toBeLessThan(1.6);
+  });
 });
 
 describe('rotacion de las bolas', () => {

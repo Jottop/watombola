@@ -31,6 +31,57 @@ function playToEnd(state: DrumState, events: DrumEvents = {}, seed = 1): void {
   }
 }
 
+describe('las expulsadas salen de la simulacion', () => {
+  it('marca como gone a las que terminaron de salir', () => {
+    const state = makeState(12);
+    startDraw(state, seededRandom(1), {});
+    playToEnd(state);
+
+    const gone = state.world.balls.filter((b) => b.gone).length;
+    expect(gone).toBe(state.world.balls.length - 1);
+  });
+
+  it('resetDrum las devuelve todas', () => {
+    const state = makeState(12);
+    startDraw(state, seededRandom(1), {});
+    playToEnd(state);
+    expect(state.world.balls.some((b) => b.gone)).toBe(true);
+
+    resetDrum(state, items(12), seededRandom(2));
+    expect(state.world.balls.every((b) => !b.gone)).toBe(true);
+  });
+
+  it('la pila baja al vaciarse, en vez de quedar sostenida', () => {
+    // Regresion: el renderer dejaba de dibujar las expulsadas pero la fisica
+    // seguia simulandolas, asi que ocupaban espacio invisible y empujaban a las
+    // demas. Medido: con 29 bolas la altura media era 0.288R, casi la misma
+    // que con 57 (0.301R): la pila no se reacomodaba en el espacio liberado.
+    const state = makeState(40);
+    startDraw(state, seededRandom(1), {});
+
+    const R = state.world.R;
+    const remaining = (): typeof state.world.balls =>
+      state.world.balls.filter((_, i) => ejectProgressOf(state, i) < 1);
+
+    const meanHeight = (balls: typeof state.world.balls): number =>
+      balls.reduce((s, b) => s + (b.y - state.world.cy) / R, 0) / balls.length;
+
+    let early = 0;
+    let late = 0;
+    for (let i = 0; i < 1400; i++) {
+      advanceDrum(state, 1 / 60, {}, seededRandom(i));
+      const balls = remaining();
+      if (state.phase !== 'ejecting') continue;
+      if (balls.length > 34 && balls.length < 40 && early === 0) early = meanHeight(balls);
+      if (balls.length > 12 && balls.length < 18) late = meanHeight(balls);
+    }
+
+    expect(early).toBeGreaterThan(0);
+    // Quedando la mitad, la pila tiene que estar claramente mas abajo.
+    expect(late).toBeGreaterThan(early + 0.1);
+  });
+});
+
 describe('sorteo', () => {
   it('recorre spinning -> ejecting -> reveal', () => {
     const state = makeState(12);

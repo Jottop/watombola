@@ -7,28 +7,7 @@ const GRAVITY = 2100;
 const DRAG = 0.55;
 const WALL_RESTITUTION = 0.58;
 const BALL_RESTITUTION = 0.5;
-const TANGENTIAL_FRICTION = 0.22;
 const MAX_SPEED = 3200;
-const SHAKE_INTERVAL = 0.07;
-const SHAKE_STRENGTH = 620;
-
-/**
- * Reparto de la sacudida: cuanto es ruido y cuanto es giro con el tambor.
- * El ruido solo desordena; la parte tangencial es la que hace girar el interior
- * de la pila, que la friccion del muro no alcanza.
- */
-/**
- * Reparto de la sacudida: cuanto es ruido y cuanto es giro con el tambor.
- * El ruido solo desordena; la parte tangencial es la que hace girar el interior
- * de la pila, que la friccion del muro no alcanza.
- *
- * Medido con 57 bolas: sin la parte tangencial el interior queda a 184 px/s
- * contra 478 de las del borde, y se ve ordenado. Con 20 la relacion se empareja
- * (531 contra 782) y el bombo se ve movido de verdad. Subirlo mas ya no aporta
- * desorden: a 35 las bolas van tan rapido que se pierde la lectura.
- */
-const SHAKE_FRACTION = 0.3;
-const SHAKE_SWIRL = 36;
 const PACKING = 0.5;
 
 /**
@@ -100,18 +79,26 @@ function restitutionFor(impact: number, e: number): number {
   return e * (impact / REST_VELOCITY);
 }
 
-/** Rozamiento de rodadura: frena siempre en contra del movimiento. */
-const ROLLING_RESISTANCE = 0.55;
-
 /** Friccion de Coulomb en los contactos, bola-muro y bola-bola. */
-const MU_WALL = 0.5;
-const MU_BALL = 0.22;
+const MU_WALL = 0.65;
+const MU_BALL = 0.35;
 
 /**
- * Cuanto del giro del tambor se traslada a las bolas. 1 seria arrastre
- * perfecto; menos de 1 porque el muro es liso y las bolas tambien patinan.
+ * Amortiguacion del giro en contactos reales. Solo toca `spin`, nunca la
+ * traslacion: frenar la velocidad del centro en nombre de la rodadura achata
+ * las trayectorias y mata la circulacion. Se aplica una vez por subpaso.
  */
-const DRUM_COUPLE = 0.7;
+const CONTACT_SPIN_DAMP = 3.0;
+
+/**
+ * Arrastre del aire puesto en movimiento por el tambor. Es un acoplamiento
+ * viscoso y suave hacia la circulacion local, no una patada por bola: no mete
+ * momento de golpe, lleva la direccion tangente correcta y se anula en el
+ * centro. La reaccion la absorbe el motor del bombo, que es externo.
+ */
+const AIR_COUPLING = 0.8;
+const AIR_RATE = 2.8;
+const AIR_SPIN_RATE = 2.8;
 
 /**
  * Umbral de reposo. El valor alto (90 px/s) parece un error y NO LO ES.
@@ -220,7 +207,6 @@ export interface World {
   agitation: number;
   spinRate: number;
   spinPhase: number;
-  shakeTimer: number;
   grid: Grid;
 }
 
@@ -250,7 +236,6 @@ export function createWorld(cx: number, cy: number, R: number, maxBalls = 200): 
     agitation: 0,
     spinRate: 4.6,
     spinPhase: 0,
-    shakeTimer: SHAKE_INTERVAL,
     grid: makeGrid(R, maxBalls),
   };
 }
@@ -440,40 +425,17 @@ export function spawnProgressOf(ball: Ball, clock: number): number {
 }
 
 /**
- * Sacudida residual.
- *
- * Antes esto era TODO el movimiento del bombo: impulsos aleatorios en cada
- * direccion, que se ven como un temblor sin causa. Ahora el giro principal lo
- * produce la friccion contra el muro (`wallFriction`).
- *
- * Pero esa friccion solo alcanza a las bolas que TOCAN el muro, y son pocas:
- * con 57 participantes apenas 11 lo hacen. El resto queda apilada en el fondo y
- * se mueve a la mitad de velocidad, asi que el bombo se ve ordenado por
- * dentro. Esta sacudida es lo unico que llega a todas, asi que su componente
- * tangencial es la que hace girar el interior con el tambor.
+ * El giro entra solo por contacto con el muro: no hay campo global que empuje
+ * a las bolas sueltas ni sacudida aleatoria por bola. Esa era la fuente de los
+ * efectos raros: aceleraba el interior sin contacto, no movia el giro de cada
+ * bola y metia momento lineal aleatorio en cada evento. La circulacion interior
+ * tiene que propagarse por choques y friccion, como en el bombo real.
  */
-function shake(world: World, rand: RandomSource): void {
-  const power = SHAKE_STRENGTH * world.agitation;
-  const spin = world.spinRate * world.agitation * SHAKE_SWIRL;
-  for (const b of world.balls) {
-    if (b.gone || b.sleeping) continue;
-    const dx = b.x - world.cx;
-    const dy = b.y - world.cy;
-    const d = Math.hypot(dx, dy) || 1;
-    const tx = -dy / d;
-    const ty = dx / d;
-    const tangent = spin * (0.4 + rand() * 0.9);
-
-    const angle = rand() * TAU;
-    const mag = power * (0.4 + rand() * 0.9) * SHAKE_FRACTION;
-
-    b.vx += Math.cos(angle) * mag + tx * tangent;
-    b.vy += Math.sin(angle) * mag + ty * tangent;
-  }
-}
-
 function integrate(world: World, dt: number): void {
   const dragK = Math.max(0, 1 - DRAG * dt);
+  const flowOmega = world.spinRate * world.agitation * AIR_COUPLING;
+  const flowK = flowOmega !== 0 ? 1 - Math.exp(-AIR_RATE * dt) : 0;
+  const spinK = flowOmega !== 0 ? 1 - Math.exp(-AIR_SPIN_RATE * dt) : 0;
 
   for (const b of world.balls) {
     if (b.gone || b.sleeping) continue;
@@ -484,6 +446,18 @@ function integrate(world: World, dt: number): void {
     // rueda sin rodar se nota.
     b.spin *= Math.max(0, 1 - DRAG * 1.6 * dt);
 
+    // Circulacion de aire arrastrado por el tambor. Es pequena frente a la
+    // gravedad, asi que no suspende bolas: solo orienta el conjunto.
+    if (flowK > 0) {
+      const dx = b.x - world.cx;
+      const dy = b.y - world.cy;
+      const flowVx = -flowOmega * dy;
+      const flowVy = flowOmega * dx;
+      b.vx += (flowVx - b.vx) * flowK;
+      b.vy += (flowVy - b.vy) * flowK;
+      b.spin += (flowOmega - b.spin) * spinK;
+    }
+
     const speed = Math.hypot(b.vx, b.vy);
     if (speed > MAX_SPEED) {
       const k = MAX_SPEED / speed;
@@ -493,18 +467,6 @@ function integrate(world: World, dt: number): void {
 
     b.x += b.vx * dt;
     b.y += b.vy * dt;
-
-    // Rozamiento de rodadura: oppone la velocidad del punto de contacto y
-    // topa el impulso para no pasarse de signo (si no, una bola lenta
-    // oscilaria en vez de frenar).
-    const contactSpeed = Math.hypot(b.vx, b.vy) + Math.abs(b.spin) * b.r;
-    if (contactSpeed > 1e-6) {
-      const decel = ROLLING_RESISTANCE * GRAVITY * dt;
-      const k = Math.max(0, 1 - decel / contactSpeed);
-      b.vx *= k;
-      b.vy *= k;
-      b.spin *= k;
-    }
   }
 }
 
@@ -512,25 +474,25 @@ function integrate(world: World, dt: number): void {
  * El bombo girando arrastra a las bolas por friccion contra el muro.
  *
  * La velocidad del punto de contacto de la bola es `v + spin*r*t`; la del muro
- * es `omega*R*t`. La diferencia es el deslizamiento. Aplicamos el impulso que
- * lo anula, topeado por Coulomb para que la bola no se quede pegada al muro:
- * si el tope entra, la bola patina, que es lo que hace de verdad.
- *
- * `omega` es la velocidad angular real del tambor. Si el arrastre fuera perfecto
- * las bolas pegarian al muro y la centrifuga las manteria arriba, que no es lo
- * que hace una tombola real: aqui manda la gravedad y las bolas caen en cascada.
+ * es `omega*R*t`. La diferencia es el deslizamiento. El impulso intenta
+ * anularlo, pero topado por Coulomb con la carga normal del contacto: una bola
+ * apenas apoyada patina, y una bola apretada contra el muro se acopla mas.
+ * Ese tope es lo que evita el arrastre perfecto y la centrifuga irreal.
  */
-function wallFriction(b: Ball, tx: number, ty: number, omega: number, R: number): void {
+function wallDrive(
+  b: Ball,
+  tx: number,
+  ty: number,
+  omega: number,
+  R: number,
+  maxImpulse: number,
+): void {
   const m = b.r * b.r;
   const slip = b.vx * tx + b.vy * ty + b.spin * b.r - omega * R;
 
   let jt = -(m * slip) / SPIN_TO_SLIP;
-
-  // Carga normal aproximada: la componente de gravedad que el muro sostiene,
-  // con un piso para que siempre haya algo de agarre en el tope.
-  const cap = MU_WALL * m * GRAVITY * 0.35;
-  if (jt > cap) jt = cap;
-  else if (jt < -cap) jt = -cap;
+  if (jt > maxImpulse) jt = maxImpulse;
+  else if (jt < -maxImpulse) jt = -maxImpulse;
 
   applyTangential(b, tx, ty, jt);
 }
@@ -538,8 +500,12 @@ function wallFriction(b: Ball, tx: number, ty: number, omega: number, R: number)
 /**
  * Mantiene cada bola dentro del tambor. Se aplica DESPUES de resolver
  * colisiones, porque separar bolas puede empujarlas contra el muro.
+ *
+ * El acople del giro se aplica una sola vez por subpaso: repetir el impulso
+ * que anula el deslizamiento en cada iteracion del solver equivale a ignorar
+ * el tope de Coulomb y pega las bolas al muro.
  */
-function constrainToWalls(world: World, omega: number): void {
+function constrainToWalls(world: World, omega: number, applyDrive: boolean): void {
   const { balls, cx, cy, R } = world;
 
   for (const b of balls) {
@@ -560,22 +526,24 @@ function constrainToWalls(world: World, omega: number): void {
     const resting = d > limit - CONTACT_SLOP;
     if (!resting) continue;
 
+    const m = b.r * b.r;
+    let approachImpulse = 0;
+    const vn = b.vx * nx + b.vy * ny;
+
     if (d > limit) {
       b.x = cx + nx * limit;
       b.y = cy + ny * limit;
-    }
 
-    const vn = b.vx * nx + b.vy * ny;
-    if (vn > 0) {
-      const bounce = restitutionFor(vn, WALL_RESTITUTION);
-      // El impulso normal que acaba de recibir es vn*(1+bounce)*m. Si alcanza
-      // a sostener el peso de la bola en un subpaso, algo la esta apuntalando.
-      if (vn * b.r * b.r >= 0.5 * b.r * b.r * GRAVITY * FIXED_DT) b.supported = true;
-      if (b.sleeping) {
-        b.sleeping = false;
-        b.still = 0;
-      }
-      if (d > limit) {
+      if (vn > 0) {
+        const bounce = restitutionFor(vn, WALL_RESTITUTION);
+        approachImpulse = vn * m;
+        // El impulso normal que acaba de recibir es vn*(1+bounce)*m. Si alcanza
+        // a sostener el peso de la bola en un subpaso, algo la esta apuntalando.
+        if (vn * b.r * b.r >= 0.5 * b.r * b.r * GRAVITY * FIXED_DT) b.supported = true;
+        if (b.sleeping) {
+          b.sleeping = false;
+          b.still = 0;
+        }
         b.vx -= vn * (1 + bounce) * nx;
         b.vy -= vn * (1 + bounce) * ny;
       }
@@ -584,18 +552,17 @@ function constrainToWalls(world: World, omega: number): void {
       b.supported = true;
     }
 
+    // Una dormida apoyada no recibe friccion hasta que un choque la despierte:
+    // si no, acumularia velocidad sin integrarla.
+    if (!applyDrive || b.sleeping) continue;
+
+    // Carga minima: el peso que el muro sostiene en un subpaso. Sin impacto no
+    // hay impulso normal medido, pero una bola apoyada igual presiona el muro.
+    const maxImpulse = MU_WALL * Math.max(approachImpulse, m * GRAVITY * FIXED_DT);
     const tx = -ny;
     const ty = nx;
-
-    // Primero el arrastre del giro, que es lo que hace girar el bombo. El
-    // rozamiento puro despues, para las bolas que no estan tocandolo.
-    wallFriction(b, tx, ty, omega * DRUM_COUPLE, R);
-
-    if (Math.abs(omega) < 1e-6) {
-      // Tambor quieto: rozamiento de Coulomb plano contra el muro.
-      const vt = b.vx * tx + b.vy * ty;
-      applyTangential(b, tx, ty, -vt * TANGENTIAL_FRICTION * b.r * b.r);
-    }
+    wallDrive(b, tx, ty, omega, R, maxImpulse);
+    b.spin *= Math.max(0, 1 - CONTACT_SPIN_DAMP * FIXED_DT);
   }
 }
 
@@ -634,7 +601,7 @@ function cellIndex(b: Ball, world: World, g: Grid): number {
   return y * g.cols + x;
 }
 
-function resolvePair(a: Ball, b: Ball): void {
+function resolvePair(a: Ball, b: Ball, dampSpin: boolean): void {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const d2 = dx * dx + dy * dy;
@@ -759,6 +726,13 @@ function resolvePair(a: Ball, b: Ball): void {
   // -n en b, y las dos fuerzas son opuestas.
   b.spin -= (SPIN_FROM_TANGENTIAL * jt) / (mb * b.r);
   a.spin -= (SPIN_FROM_TANGENTIAL * jt) / (ma * a.r);
+
+  // Rodadura en contacto real: solo se amortigua el giro, una vez por subpaso.
+  if (dampSpin) {
+    const k = Math.max(0, 1 - CONTACT_SPIN_DAMP * FIXED_DT);
+    a.spin *= k;
+    b.spin *= k;
+  }
 }
 
 // Vecindario 3x3 completo. Con el filtro `j > i` de resolveCollisions cada
@@ -778,7 +752,7 @@ const NEIGHBORS = [
   [1, 1],
 ] as const;
 
-function resolveCollisions(world: World): void {
+function resolveCollisions(world: World, dampSpin: boolean): void {
   buildGrid(world);
   const g = world.grid;
   const cols = g.cols;
@@ -800,27 +774,17 @@ function resolveCollisions(world: World): void {
       const cell = gy * cols + gx;
       for (let k = g.counts[cell]!; k < g.counts[cell + 1]!; k++) {
         const j = g.items[k]!;
-        if (j > i) resolvePair(a, balls[j]!);
+        if (j > i) resolvePair(a, balls[j]!, dampSpin);
       }
     }
   }
 }
 
-export function advanceWorld(world: World, dt: number, rand: RandomSource): void {
+export function advanceWorld(world: World, dt: number, _rand: RandomSource): void {
   if (dt <= 0) return;
 
   world.spinPhase += world.spinRate * world.agitation * dt;
   const omega = world.spinRate * world.agitation;
-
-  if (world.agitation > 0.001) {
-    world.shakeTimer -= dt;
-    while (world.shakeTimer <= 0) {
-      world.shakeTimer += SHAKE_INTERVAL;
-      shake(world, rand);
-    }
-  } else {
-    world.shakeTimer = SHAKE_INTERVAL;
-  }
 
   // El solver recalcula `supported` desde cero en cada paso; el frame arranca
   // limpiandolo para que no contamine lo que quedo del anterior.
@@ -834,8 +798,8 @@ export function advanceWorld(world: World, dt: number, rand: RandomSource): void
     const h = Math.min(FIXED_DT, remaining);
     integrate(world, h);
     for (let s = 0; s < SOLVER_ITERATIONS; s++) {
-      resolveCollisions(world);
-      constrainToWalls(world, omega);
+      resolveCollisions(world, s === 0);
+      constrainToWalls(world, omega, s === 0);
     }
     remaining -= h;
   }
@@ -880,8 +844,8 @@ export function advanceWorld(world: World, dt: number, rand: RandomSource): void
 /** Util para tests: separa dos bolas que se hayan solapado. */
 export function resolveCollisionsNow(world: World): void {
   for (let s = 0; s < SOLVER_ITERATIONS; s++) {
-    resolveCollisions(world);
-    constrainToWalls(world, 0);
+    resolveCollisions(world, s === 0);
+    constrainToWalls(world, 0, s === 0);
   }
 }
 

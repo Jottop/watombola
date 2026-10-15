@@ -282,4 +282,55 @@ describe('helpers', () => {
   it('toma la primera columna de un CSV', () => {
     expect(parseImportText('Juan,Perez\n')[0]?.name).toBe('Juan');
   });
+
+  it('importa una lista de suscriptores en una sola linea', () => {
+    // Formato real de Twitch Subs: "nick: meses" separados por coma. Antes
+    // entraba UNO solo, con el ": 70" pegado al nombre, y los otros cinco se
+    // perdian.
+    const line =
+      'joakinginthenorth: 70, enddor74: 64, sturmovik33: 62, lefirv5: 41, benjaskte: 38, thu_gatita: 28';
+    const out = parseImportText(line);
+
+    expect(out.map((p) => p.name)).toEqual([
+      'joakinginthenorth',
+      'enddor74',
+      'sturmovik33',
+      'lefirv5',
+      'benjaskte',
+      'thu_gatita',
+    ]);
+  });
+
+  it('importa la lista de suscriptores tambien con uno por linea', () => {
+    const out = parseImportText('enddor74: 64\nlefirv5: 41\n');
+    expect(out.map((p) => p.name)).toEqual(['enddor74', 'lefirv5']);
+  });
+
+  it('no parte un CSV de una persona aunque tenga dos campos', () => {
+    // El patron exige ": <digitos>" al final, asi que "Juan,Perez" nunca entra
+    // en modo suscriptores.
+    const out = parseImportText('Juan,Perez\n');
+    expect(out).toHaveLength(1);
+    expect(out[0]?.name).toBe('Juan');
+  });
+
+  it('ignora segmentos sueltos dentro de una linea de suscriptores', () => {
+    const out = parseImportText('enddor74: 64, ruido, lefirv5: 41\n');
+    expect(out.map((p) => p.name)).toEqual(['enddor74', 'lefirv5']);
+  });
+
+  it('no confunde "nombre: texto" con una entrada de suscriptores', () => {
+    const out = parseImportText('fulanito: hola\n');
+    expect(out.map((p) => p.name)).toEqual(['fulanito: hola']);
+  });
+
+  it('quita comillas y espacios de los nicks', () => {
+    const out = parseImportText('"enddor74" : 64\n');
+    expect(out.map((p) => p.name)).toEqual(['enddor74']);
+  });
+
+  it('deduplica nicks repetidos en la lista', () => {
+    const out = parseImportText('enddor74: 64, enddor74: 30\n');
+    expect(out.map((p) => p.name)).toEqual(['enddor74']);
+  });
 });

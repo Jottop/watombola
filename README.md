@@ -56,6 +56,24 @@ Detalles que conviene saber:
   afirma que *pidió* escuchar. Si Twitch corta la conexión (pasa con IRC anónimo
   en canales muy activos) el único indicio real está en la consola del navegador.
 
+## Cargar participantes
+
+En `/control`, la sección *Carga masiva* acepta pegar una lista o importar un
+archivo `.csv` o `.txt`. Los formatos que entiende:
+
+| Formato | Ejemplo | Resultado |
+|---|---|---|
+| Uno por línea | `Juan Perez` | Una persona |
+| CSV de una persona | `Juan,Perez` | Una persona, `Juan Perez` no: toma la primera columna |
+| Lista de suscriptores | `enddor74: 64, lefirv5: 41` | **Dos** personas: `enddor74` y `lefirv5` |
+
+El formato de suscriptores acepta los meses de suscripción pegados (`nick: 70`) y
+los descarta; funciona en una sola línea o uno por línea.
+
+El disparador del formato de suscriptores es el `: <número>` del final, no la
+coma. Por eso `Juan,Perez` nunca se parte en dos personas: no tiene nada
+después de los dos puntos.
+
 ## Datos de prueba
 
 El checkbox "Datos de prueba al iniciar" de la sección Participantes es un

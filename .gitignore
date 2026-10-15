@@ -13,6 +13,10 @@ yarn-error.log*
 pnpm-debug.log*
 errorlog.txt
 
+# listas de suscriptores locales: son nicks de personas reales, el repo es publico
+formato.txt
+sugerencia.txt
+
 # screenshots de las pruebas de navegador
 shots/
 

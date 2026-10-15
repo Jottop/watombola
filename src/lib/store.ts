@@ -244,7 +244,54 @@ export function clearEverything(): void {
 
 const HEADER = /^nombre$/i;
 
-/** Acepta CSV/TSV/TXT: una columna, o "nombre,apellido" / "nombre<TAB>apellido". */
+/**
+ * Entrada de lista de suscriptores: "nick: 70". El numero son meses de
+ * suscripcion y no forma parte del nombre.
+ *
+ * El `: <digitos>` final es lo que distingue este formato de un CSV
+ * "nombre,apellido", y por eso el disparador no puede ser la coma.
+ */
+const SUB_ENTRY = /^(.+?)\s*:\s*\d+$/;
+
+/**
+ * De una linea, saca los nombres que aporta.
+ *
+ * Hace DOS cosas distintas segun la linea, y es deliberado:
+ *
+ * - CSV de una persona ("Juan,Perez"): una sola entrada, la primera columna.
+ *   Esto es lo que hacia siempre.
+ * - Lista de suscriptores ("joaking: 70, enddor: 64"): cada segmento es una
+ *   persona. Sin esto la linea entera se tomaba como una sola y se perdian
+ *   todas menos la primera.
+ *
+ * El modo se decide por el PRIMER segmento: "Juan,Perez" no matchea el patron
+ * (no hay ":" seguido de digitos) asi que nunca se parte en dos.
+ */
+function namesFromRow(row: string): string[] {
+  const segments = row
+    .split(/[,;\t]/)
+    .map((c) => c.trim())
+    .filter((c) => c !== '');
+
+  if (segments.length === 0) return [];
+
+  if (!SUB_ENTRY.test(segments[0]!)) return [segments[0]!];
+
+  const names: string[] = [];
+  for (const segment of segments) {
+    const match = SUB_ENTRY.exec(segment);
+    // Un segmento suelto que no matchea dentro de una linea de suscriptores se
+    // ignora: casi siempre es ruido de pegado a mano.
+    if (match) names.push(match[1]!);
+  }
+  return names;
+}
+
+/**
+ * Acepta CSV/TSV/TXT: una columna, o "nombre,apellido" / "nombre<TAB>apellido".
+ * Tambien acepta listas de suscriptores "nick: meses" separadas por coma, en una
+ * sola linea o una por linea.
+ */
 export function parseImportText(text: string): Participant[] {
   const seen = new Set<string>();
   const out: Participant[] = [];
@@ -253,18 +300,17 @@ export function parseImportText(text: string): Participant[] {
     const row = line.trim();
     if (!row || row.startsWith('#')) continue;
 
-    const field = row.split(/[,;\t]/).map((c) => c.trim()).find((c) => c !== '');
-    if (!field) continue;
+    for (const field of namesFromRow(row)) {
+      const name = normalizeName(field.replace(/^["']|["']$/g, ''));
+      if (!isValidName(name) || HEADER.test(name)) continue;
 
-    const name = normalizeName(field.replace(/^["']|["']$/g, ''));
-    if (!isValidName(name) || HEADER.test(name)) continue;
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
 
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    out.push({ id: makeId(), name });
-    if (out.length >= MAX_PARTICIPANTS) break;
+      out.push({ id: makeId(), name });
+      if (out.length >= MAX_PARTICIPANTS) return out;
+    }
   }
 
   return out;

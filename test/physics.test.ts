@@ -19,10 +19,15 @@ function items(n: number): ParticipantItem[] {
   return Array.from({ length: n }, (_, i) => ({ id: `p${i}`, label: `P${i}` }));
 }
 
-function run(world: ReturnType<typeof createWorld>, frames: number, agitation: number): void {
+function run(
+  world: ReturnType<typeof createWorld>,
+  frames: number,
+  agitation: number,
+  seed = 0,
+): void {
   for (let i = 0; i < frames; i++) {
     world.agitation = agitation;
-    advanceWorld(world, 1 / 60, seededRandom(i));
+    advanceWorld(world, 1 / 60, seededRandom(seed + i));
   }
 }
 
@@ -288,17 +293,46 @@ describe('rotacion de las bolas', () => {
 });
 
 describe('reposo', () => {
-  it('una pila corta se asienta de verdad', () => {
-    // Con pocas bolas el solver converge y todas quedan quietas. El umbral
-    // sale medido: a 10 bolas el residuo queda por debajo de 2 px/s.
-    const world = createWorld(0, 0, 300, 20);
-    populate(world, items(10), seededRandom(13));
+  it('una pila se asienta y se queda quieta', () => {
+    // La metrica es la DERIVA, no la velocidad instantanea: lo que se ve en
+    // pantalla es que la bola se mueva de lugar. Medido con 57 bolas: la deriva
+    // cae de 3.5px a 0.17px en 10s una vez que las dormidas salen de verdad de
+    // la integracion.
+    const world = createWorld(0, 0, 335, 200);
+    populate(world, items(57), seededRandom(13));
     run(world, 1800, 0);
 
-    for (const b of world.balls) {
-      expect(Math.hypot(b.vx, b.vy)).toBeLessThan(2);
-      expect(Math.abs(b.spin)).toBeLessThan(0.2);
+    const antes = world.balls.map((b) => ({ x: b.x, y: b.y }));
+    run(world, 600, 0, 5000);
+
+    let peor = 0;
+    for (let i = 0; i < world.balls.length; i++) {
+      peor = Math.max(peor, Math.hypot(world.balls[i]!.x - antes[i]!.x, world.balls[i]!.y - antes[i]!.y));
     }
+    expect(peor).toBeLessThan(1);
+  });
+
+  it('las dormidas no reciben gravedad', () => {
+    // Si una bola "congelada" siguiera en la integracion, la gravedad la
+    // hundiria, perderia el contacto y se despertaria: un ciclo lento que en
+    // pantalla parece una bola flotando y tiritando.
+    const world = createWorld(0, 0, 335, 200);
+    populate(world, items(30), seededRandom(7));
+    run(world, 1800, 0);
+
+    const dormidas = world.balls.filter((b) => b.sleeping);
+    expect(dormidas.length).toBeGreaterThan(0);
+
+    const antes = dormidas.map((b) => ({ x: b.x, y: b.y }));
+    run(world, 300, 0, 8000);
+
+    // Solo las que siguen dormidas: una que se despierta por un choque es
+    // comportamiento correcto y no tiene por qué quedarse pegada.
+    dormidas.forEach((b, i) => {
+      if (!b.sleeping) return;
+      expect(Math.hypot(b.x - antes[i]!.x, b.y - antes[i]!.y)).toBe(0);
+      expect(Math.hypot(b.vx, b.vy)).toBe(0);
+    });
   });
 
   it('el residuo crece con la profundidad de la pila, no al reves', () => {

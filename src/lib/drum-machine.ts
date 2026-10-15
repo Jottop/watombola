@@ -10,7 +10,7 @@ export const SPIN_DOWN = 1.8;
 export const EJECT_STAGGER = 0.07;
 export const EJECT_TRAVEL = 0.55;
 export const REVEAL_DURATION = 0.9;
-export const EJECT_IDLE_AGITATION = 0.06;
+export const EJECT_IDLE_AGITATION = 0;
 
 export interface DrumEvents {
   onPhaseChange?(phase: Phase, previous: Phase): void;
@@ -120,9 +120,13 @@ export function startDraw(
   state.revealFired = false;
   state.revealProgress = 0;
   state.world.agitation = 0;
-  // Por si se arranca un sorteo sin pasar por resetDrum: ninguna bola arranca
+// Por si se arranca un sorteo sin pasar por resetDrum: ninguna bola arranca
   // marcada como salida.
-  for (const ball of state.world.balls) ball.gone = false;
+  for (const ball of state.world.balls) {
+    ball.gone = false;
+    ball.sleeping = false;
+    ball.still = 0;
+  }
 
   setPhase(state, 'spinning', events);
   return true;
@@ -247,10 +251,26 @@ export function advanceDrum(
  * salir, la bola todavia colisiona como siempre.
  */
 function markEjected(state: DrumState): void {
+  let salio = false;
   for (let i = 0; i < state.world.balls.length; i++) {
     const ball = state.world.balls[i]!;
     if (ball.gone) continue;
-    if (ejectProgressOf(state, i) >= 1) ball.gone = true;
+    if (ejectProgressOf(state, i) >= 1) {
+      ball.gone = true;
+      salio = true;
+    }
+  }
+
+  // Despertar a las dormidas. Una bola congelada que estaba apoyada en la que
+  // acaba de salir se queda sin apoyo, pero como la que salio se saca de la
+  // simulacion NO hay ningun contacto que la despierte: quedaria flotando en
+  // el aire para siempre. Es el caso contrario del bug que motivation esto.
+  if (salio) {
+    for (const ball of state.world.balls) {
+      if (!ball.sleeping) continue;
+      ball.sleeping = false;
+      ball.still = 0;
+    }
   }
 }
 

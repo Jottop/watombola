@@ -130,6 +130,31 @@ const SLEEP_SPEED = 90;
 const SLEEP_SPIN = 0.6;
 const SLEEP_DELAY = 0.22;
 
+/**
+ * Un contacto tiene que apuntar claramente hacia abajo para contar como
+ * apoyo. El epsilon evita que un roce casi lateral congele una bola que en
+ * realidad esta cayendo de costado.
+ */
+const CONTACT_SUPPORT_EPS = 0.12;
+
+/**
+ * Holgura del contacto que sostiene, como fraccion del radio. Chico: si una
+ * bola no tiene a NADIE debajo a esta distancia, esta de verdad sola en el aire
+ * y congelarla seria el bug que el flag `supported` existe para evitar.
+ */
+const SUPPORT_MARGIN = 0.14;
+
+/**
+ * Agitacion por encima de la cual nadie duerme.
+ *
+ * No es lo mismo "el bombo gira" que "el bombo esta apenas vivo". Durante el
+ * vaciado la agitacion es 0.06: demasiado poco para circular, pero bastante
+ * para que la sacudida no pare, y con el tope en 0.001 las bolas no dormian
+ * nunca. Medido: 26 de cada 50 quedantes temblaban a 12-120 px/s durante toda
+ * la eyeccion.
+ */
+const WAKE_AGITATION = 0.25;
+
 export const MIN_BALL_R = 7;
 export const MAX_BALL_R = 42;
 
@@ -163,6 +188,15 @@ export interface Ball {
    * abria y las que quedaban no se reacomodaban.
    */
   gone: boolean;
+  /**
+   * Congelada de verdad: el solver la saltea por completo.
+   *
+   * No alcanza con ponerle la velocidad en cero. `integrate` le seguia aplicando
+   * gravedad,deriveda unas decimas de pixel por segundo hacia abajo, perdia el
+   * contacto, se despertaba y volvia a caer: un ciclo lento que en pantalla se
+   * ve como una bola flotando y tiritando en el aire.
+   */
+  sleeping: boolean;
   r: number;
   hue: number;
   /** Reloj global en que la bola entro; se usa para la animacion de aparicion. */
@@ -316,6 +350,7 @@ export function populate(world: World, items: readonly ParticipantItem[], rand: 
       still: 0,
       supported: false,
       gone: false,
+      sleeping: false,
       r,
       hue: (i * 137.508) % 360,
       spawnAt: 0,
@@ -389,6 +424,7 @@ export function addBall(
     still: 0,
     supported: false,
     gone: false,
+    sleeping: false,
     r: target,
     hue: (world.balls.length * 137.508) % 360,
     spawnAt: changed ? clock - SPAWN_DURATION : clock,
@@ -420,7 +456,7 @@ function shake(world: World, rand: RandomSource): void {
   const power = SHAKE_STRENGTH * world.agitation;
   const spin = world.spinRate * world.agitation * SHAKE_SWIRL;
   for (const b of world.balls) {
-    if (b.gone) continue;
+    if (b.gone || b.sleeping) continue;
     const dx = b.x - world.cx;
     const dy = b.y - world.cy;
     const d = Math.hypot(dx, dy) || 1;
@@ -433,7 +469,6 @@ function shake(world: World, rand: RandomSource): void {
 
     b.vx += Math.cos(angle) * mag + tx * tangent;
     b.vy += Math.sin(angle) * mag + ty * tangent;
-    b.still = 0;
   }
 }
 
@@ -441,7 +476,7 @@ function integrate(world: World, dt: number): void {
   const dragK = Math.max(0, 1 - DRAG * dt);
 
   for (const b of world.balls) {
-    if (b.gone) continue;
+    if (b.gone || b.sleeping) continue;
     b.vy += GRAVITY * dt;
     b.vx *= dragK;
     b.vy *= dragK;
@@ -536,6 +571,10 @@ function constrainToWalls(world: World, omega: number): void {
       // El impulso normal que acaba de recibir es vn*(1+bounce)*m. Si alcanza
       // a sostener el peso de la bola en un subpaso, algo la esta apuntalando.
       if (vn * b.r * b.r >= 0.5 * b.r * b.r * GRAVITY * FIXED_DT) b.supported = true;
+      if (b.sleeping) {
+        b.sleeping = false;
+        b.still = 0;
+      }
       if (d > limit) {
         b.vx -= vn * (1 + bounce) * nx;
         b.vy -= vn * (1 + bounce) * ny;
@@ -599,6 +638,25 @@ function resolvePair(a: Ball, b: Ball): void {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const d2 = dx * dx + dy * dy;
+
+  // El contacto que sostiene se busca ANTES del corte por solapamiento, y con
+  // un margen. Si se mirara solo cuando las bolas se pisan, la mayoria no
+  // contaria: la correccion posicional las deja justo a `rsum` de distancia,
+  // donde `d2 >= rsum*rsum` y la funcion vuelve sin hacer nada. Medido: con 57
+  // bolas solo 1 de 57 declaraba apoyo y por eso ninguna llegaba a dormir,
+  // aunque ninguna pasara de 33 px/s.
+  // El margen es holgura extra sobre el contacto real. Sin ella el apoyo se
+  // detecta en el ~93% de los frames y el 7% restante resetea el contador de
+  // quietas antes de que llegue al umbral: medido, `still` se quedaba clavado
+  // en 0.23 con un umbral de 0.22 y casi nada dormia.
+  const supportRange = a.r + b.r + (a.r + b.r) * SUPPORT_MARGIN;
+  if (d2 < supportRange * supportRange) {
+    const sd = Math.sqrt(d2) || 1;
+    const sny = dy / sd;
+    if (sny > CONTACT_SUPPORT_EPS) a.supported = true;
+    else if (sny < -CONTACT_SUPPORT_EPS) b.supported = true;
+  }
+
   const rsum = a.r + b.r;
   if (d2 >= rsum * rsum) return;
 
@@ -618,6 +676,21 @@ function resolvePair(a: Ball, b: Ball): void {
   const ma = a.r * a.r;
   const mb = b.r * b.r;
   const total = ma + mb;
+
+  // Contacto que sostiene, se marque o no impulso.
+  //
+  // Antes `supported` solo se activaba con un impulso de verdad (vn < 0), y en
+  // una pila ya asentada muchas parejas no se estan acercando: el contacto
+  // existe pero no genera impulso. Resultado: la pila nunca se declaraba
+  // apoyada, nadie dormia, y el bombo se quedaba temblando para siempre con
+  // velocidades de 1-3 px/s.
+  //
+  // La direccion del contacto dice si sostiene: la normal va de a hacia b, asi
+  // que si b esta debajo de a (ny > 0) el contacto sostiene a `a`. Un contacto
+  // lateral (ny ~ 0), como el de una bola que cae junto al muro, no sostiene a
+  // nadie y la bola sigue cayendo.
+  if (ny > CONTACT_SUPPORT_EPS) a.supported = true;
+  else if (ny < -CONTACT_SUPPORT_EPS) b.supported = true;
 
   // Correccion posicional ponderada por masa: las bolas livianas ceden mas.
   const overlap = rsum - d - CONTACT_SLOP;
@@ -643,6 +716,16 @@ function resolvePair(a: Ball, b: Ball): void {
   // suyo tiene con que sostenerse, y puede dormir.
   if (impulse * (ma / total) >= 0.5 * ma * GRAVITY * FIXED_DT) a.supported = true;
   if (impulse * (mb / total) >= 0.5 * mb * GRAVITY * FIXED_DT) b.supported = true;
+
+  // Un choque de verdad despierta a las dos.
+  if (a.sleeping) {
+    a.sleeping = false;
+    a.still = 0;
+  }
+  if (b.sleeping) {
+    b.sleeping = false;
+    b.still = 0;
+  }
 
   a.vx -= (nx * impulse) / ma;
   a.vy -= (ny * impulse) / ma;
@@ -757,9 +840,13 @@ export function advanceWorld(world: World, dt: number, rand: RandomSource): void
     remaining -= h;
   }
 
-  if (world.agitation > 0.001) {
-    // Mientras el bombo gira nada duerme: la agitacion es la que despierta.
-    for (const b of world.balls) b.still = 0;
+  if (world.agitation > WAKE_AGITATION) {
+    // Con el bombo girando de verdad nada duerme: la agitacion es la que
+    // despierta.
+    for (const b of world.balls) {
+      if (b.gone) continue;
+      b.still = 0;
+    }
     return;
   }
 
@@ -777,6 +864,7 @@ export function advanceWorld(world: World, dt: number, rand: RandomSource): void
       Math.abs(b.spin) > SLEEP_SPIN
     ) {
       b.still = 0;
+      b.sleeping = false;
       continue;
     }
     b.still += dt;
@@ -784,6 +872,7 @@ export function advanceWorld(world: World, dt: number, rand: RandomSource): void
       b.vx = 0;
       b.vy = 0;
       b.spin = 0;
+      b.sleeping = true;
     }
   }
 }

@@ -185,6 +185,55 @@ export class AudioEngine {
   }
 
   /**
+   * Golpe leve al sacudir el bombo a mano (tecla R). Un cuerpo grave corto y un
+   * roce sordo, mas bajo y apagado que un rebote para que no compita con el
+   * sonido del sorteo.
+   */
+  knock(): void {
+    const ctx = this.ctx;
+    const master = this.master;
+    const noise = this.noise;
+    if (!ctx || !master || !noise || this.settings.muted) return;
+    const t = ctx.currentTime;
+
+    const body = ctx.createOscillator();
+    body.type = 'sine';
+    const low = 150 + Math.random() * 40;
+    body.frequency.setValueAtTime(low, t);
+    body.frequency.exponentialRampToValueAtTime(low * 0.6, t + 0.18);
+
+    const bodyGain = ctx.createGain();
+    bodyGain.gain.setValueAtTime(0.0001, t);
+    bodyGain.gain.exponentialRampToValueAtTime(0.18, t + 0.012);
+    bodyGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+
+    const thud = ctx.createBufferSource();
+    thud.buffer = noise;
+    thud.playbackRate.value = 0.7;
+
+    const band = ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.value = 320;
+    band.Q.value = 1.1;
+
+    const thudGain = ctx.createGain();
+    thudGain.gain.setValueAtTime(0.0001, t);
+    thudGain.gain.exponentialRampToValueAtTime(0.1, t + 0.008);
+    thudGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+
+    body.connect(bodyGain);
+    bodyGain.connect(master);
+    thud.connect(band);
+    band.connect(thudGain);
+    thudGain.connect(master);
+
+    body.start(t);
+    body.stop(t + 0.3);
+    thud.start(t, Math.random() * 1.5);
+    thud.stop(t + 0.22);
+  }
+
+  /**
    * Rebote entre bolas.
    *
    * Cada impacto combina cuerpo grave, resonancia media y ataque agudo para que
@@ -266,41 +315,60 @@ export class AudioEngine {
     ping.stop(t + pingDecay + 0.02);
   }
 
+  /**
+   * Fanfarria del ganador, estilo casino.
+   *
+   * Una corrida rapida de campanillas que desemboca en un acorde brillante y unos
+   * destellos, como una tragamonedas que paga. Cada campanilla mezcla el tono
+   * base con un parcial inarmonico (x2.76): asi suena a metal y no a nota pura.
+   */
   fanfare(): void {
-    if (!this.ctx || !this.master || this.settings.muted) return;
-    const t = this.now();
-    const notes = [523.25, 659.25, 783.99, 1046.5, 1318.5];
+    const ctx = this.ctx;
+    const master = this.master;
+    if (!ctx || !master || this.settings.muted) return;
+    const t = ctx.currentTime;
 
-    notes.forEach((freq, i) => {
-      const at = t + i * 0.085;
-      const osc = this.ctx!.createOscillator();
-      osc.type = i === notes.length - 1 ? 'triangle' : 'sine';
-      osc.frequency.value = freq;
-
-      const gain = this.ctx!.createGain();
+    const bell = (freq: number, at: number, dur: number, peak: number): void => {
+      const gain = ctx.createGain();
       gain.gain.setValueAtTime(0.0001, at);
-      gain.gain.exponentialRampToValueAtTime(0.26, at + 0.015);
-      gain.gain.exponentialRampToValueAtTime(0.0001, at + (i === notes.length - 1 ? 0.9 : 0.32));
+      gain.gain.exponentialRampToValueAtTime(peak, at + 0.005);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+      gain.connect(master);
 
-      osc.connect(gain);
-      gain.connect(this.master!);
-      osc.start(at);
-      osc.stop(at + 1);
-    });
+      const tone = ctx.createOscillator();
+      tone.type = 'sine';
+      tone.frequency.value = freq;
+      tone.connect(gain);
+      tone.start(at);
+      tone.stop(at + dur + 0.05);
 
-    const shimmer = this.ctx.createOscillator();
-    shimmer.type = 'sine';
-    shimmer.frequency.setValueAtTime(2093, t + 0.42);
-    shimmer.frequency.exponentialRampToValueAtTime(3136, t + 1.1);
+      // Parcial inarmonico: es lo que le da el timbre metalico a la campanilla.
+      const overtone = ctx.createOscillator();
+      overtone.type = 'sine';
+      overtone.frequency.value = freq * 2.76;
 
-    const gain = this.ctx.createGain();
-    gain.gain.setValueAtTime(0.0001, t + 0.42);
-    gain.gain.exponentialRampToValueAtTime(0.12, t + 0.5);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + 1.25);
+      const overtoneGain = ctx.createGain();
+      overtoneGain.gain.setValueAtTime(0.0001, at);
+      overtoneGain.gain.exponentialRampToValueAtTime(peak * 0.5, at + 0.004);
+      overtoneGain.gain.exponentialRampToValueAtTime(0.0001, at + dur * 0.55);
 
-    shimmer.connect(gain);
-    gain.connect(this.master);
-    shimmer.start(t + 0.42);
-    shimmer.stop(t + 1.3);
+      overtone.connect(overtoneGain);
+      overtoneGain.connect(master);
+      overtone.start(at);
+      overtone.stop(at + dur + 0.05);
+    };
+
+    // Corrida ascendente de campanillas.
+    const run = [659.25, 783.99, 987.77, 1174.66, 1318.51, 1567.98, 1975.53];
+    run.forEach((freq, i) => bell(freq, t + i * 0.055, 0.28, 0.13));
+
+    // Acorde final brillante, sostenido.
+    const chordAt = t + run.length * 0.055 + 0.02;
+    [1046.5, 1318.51, 1567.98, 2093].forEach((freq) => bell(freq, chordAt, 0.9, 0.12));
+
+    // Destellos sueltos encima del acorde, como monedas cayendo.
+    for (let i = 0; i < 4; i++) {
+      bell(2093 + Math.random() * 1568, chordAt + 0.05 + i * 0.055, 0.18, 0.05);
+    }
   }
 }

@@ -6,6 +6,7 @@ import {
   isBusy,
   loadParticipants,
   resetDrum,
+  shakeDrum,
   startDraw,
   winnerBall,
   type DrumEvents,
@@ -215,5 +216,47 @@ describe('sorteo', () => {
     for (const count of counts) {
       expect(Math.abs(count - expected) / expected).toBeLessThan(0.08);
     }
+  });
+});
+
+describe('sacudida manual', () => {
+  it('solo sacude en reposo', () => {
+    const state = makeState(10);
+    expect(shakeDrum(state, 1, 0)).toBe(true);
+
+    startDraw(state, seededRandom(1));
+    expect(shakeDrum(state, 1, 0)).toBe(false);
+  });
+
+  it('despierta y mueve las bolas de la pila', () => {
+    const state = makeState(20);
+    for (let i = 0; i < 1200; i++) advanceDrum(state, 1 / 60, {}, seededRandom(i));
+    expect(state.world.balls.some((b) => b.sleeping)).toBe(true);
+
+    shakeDrum(state, 1, 0);
+    expect(state.world.balls.every((b) => !b.sleeping)).toBe(true);
+  });
+
+  it('el retroceso visual del bombo vuelve a cero', () => {
+    const state = makeState(10);
+    shakeDrum(state, 1, 0);
+    expect(Math.abs(state.shakeVX)).toBeGreaterThan(0);
+
+    for (let i = 0; i <= 600; i++) advanceDrum(state, 1 / 60, {}, seededRandom(i));
+
+    expect(Math.abs(state.shakeX)).toBeLessThan(0.5);
+    expect(Math.abs(state.shakeY)).toBeLessThan(0.5);
+    expect(Math.hypot(state.shakeVX, state.shakeVY)).toBeLessThan(1);
+  });
+
+  it('resetDrum limpia el retroceso', () => {
+    const state = makeState(10);
+    shakeDrum(state, 0, 1);
+    resetDrum(state, items(10), seededRandom(2));
+
+    expect(state.shakeX).toBe(0);
+    expect(state.shakeY).toBe(0);
+    expect(state.shakeVX).toBe(0);
+    expect(state.shakeVY).toBe(0);
   });
 });

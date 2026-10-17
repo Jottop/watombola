@@ -9,6 +9,8 @@ import {
   populate,
   resizeWorld,
   resolveCollisionsNow,
+  SHAKE_IMPULSE,
+  shakeWorld,
   SPAWN_DURATION,
   spawnProgressOf,
   type World,
@@ -546,5 +548,57 @@ describe('addBall', () => {
     expect(spawnProgressOf(fresh, 10 + SPAWN_DURATION / 2)).toBeCloseTo(0.5, 5);
     expect(spawnProgressOf(fresh, 10 + SPAWN_DURATION)).toBeCloseTo(1, 5);
     expect(spawnProgressOf(fresh, 10 + SPAWN_DURATION * 2)).toBe(1);
+  });
+});
+
+describe('sacudida manual', () => {
+  function settled(count = 40): World {
+    const world = createWorld(0, 0, 300, 60);
+    populate(world, items(count), seededRandom(13));
+    run(world, 1200, 0);
+    return world;
+  }
+
+  it('despierta todas las bolas y las empuja en la direccion del golpe', () => {
+    const world = settled();
+    expect(world.balls.some((b) => b.sleeping)).toBe(true);
+
+    shakeWorld(world, 1, 0, 400);
+
+    expect(world.balls.every((b) => !b.sleeping)).toBe(true);
+    const meanVx = world.balls.reduce((s, b) => s + b.vx, 0) / world.balls.length;
+    expect(meanVx).toBeGreaterThan(0);
+  });
+
+  it('las bolas del lado del golpe salen con mas fuerza', () => {
+    const world = settled();
+    shakeWorld(world, 1, 0, 400);
+
+    const speed = (side: 'left' | 'right'): number => {
+      const set = world.balls.filter((b) => (side === 'left' ? b.x < world.cx : b.x > world.cx));
+      return set.reduce((s, b) => s + Math.hypot(b.vx, b.vy), 0) / set.length;
+    };
+
+    // El golpe empuja hacia +x: el impacto es del lado izquierdo.
+    expect(speed('left')).toBeGreaterThan(speed('right'));
+  });
+
+  it('con el golpe fuerte las bolas no se escapan del bombo', () => {
+    const world = settled();
+    shakeWorld(world, 1, 0, SHAKE_IMPULSE);
+    run(world, 120, 0);
+
+    for (const b of world.balls) {
+      expect(Number.isFinite(b.x)).toBe(true);
+      expect(Number.isFinite(b.y)).toBe(true);
+      expect(Math.hypot(b.x - world.cx, b.y - world.cy) + b.r).toBeLessThanOrEqual(world.R + 1);
+    }
+  });
+
+  it('sin direccion no toca nada', () => {
+    const world = settled();
+    const before = world.balls.map((b) => [b.vx, b.vy, b.sleeping]);
+    shakeWorld(world, 0, 0, 400);
+    expect(world.balls.map((b) => [b.vx, b.vy, b.sleeping])).toEqual(before);
   });
 });

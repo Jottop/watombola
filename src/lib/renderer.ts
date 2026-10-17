@@ -382,10 +382,17 @@ export function renderDrum(ctx: CanvasRenderingContext2D, state: DrumState, opts
   ctx.clearRect(0, 0, opts.width, opts.height);
   ensureGradients(ctx);
 
+  // El bombo entero se corre con el retroceso del golpe manual: el vidrio, el
+  // pedestal, la boca y las bolas se mueven como una sola pieza.
+  ctx.save();
+  ctx.translate(state.shakeX, state.shakeY);
+
   drawPedestal(ctx, state);
   drawGlass(ctx, state);
   drawChute(ctx, state, state.phase === 'ejecting');
   drawBalls(ctx, state, opts);
+
+  ctx.restore();
 }
 
 export function resetRendererCache(): void {

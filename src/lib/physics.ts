@@ -2,148 +2,123 @@
 import type { ParticipantItem } from './types';
 
 const TAU = Math.PI * 2;
+
+/**
+ * Paso temporal fijo. La simulacion nunca ve el dt real del frame: eso la haria
+ * depender de los FPS. `advanceWorld` parte el dt en pasos de este tamano.
+ */
 const FIXED_DT = 1 / 120;
+
+/**
+ * Techo de tiempo simulado por llamada. Un frame perdido (pausa de OBS, tab en
+ * segundo plano) puede traer un dt enorme: sin tope habria que simular segundos
+ * enteros de una sola vez y el overlay se congelaria. El resto se descarta.
+ */
+const MAX_FRAME_DT = 0.25;
+
 const GRAVITY = 2100;
+
+/** Amortiguacion viscosa del aire, como factor por segundo. */
 const DRAG = 0.55;
-const WALL_RESTITUTION = 0.58;
-const BALL_RESTITUTION = 0.5;
+/** El giro se frena algo mas fuerte: una bola que rueda sin rodar se nota. */
+const SPIN_DRAG = DRAG * 1.6;
+
 const MAX_SPEED = 3200;
+
 const PACKING = 0.5;
 
+export const MIN_BALL_R = 7;
+export const MAX_BALL_R = 42;
+
 /**
- * Iteraciones del solver por subpaso. A 200 bolas y 1/120 son 12 pasadas por
- * frame y eso se nota: subir de 6 a 8 multiplica el costo por casi un tercio.
- *
- * El limite real es que un solver de impulsos secuenciales SIN warm starting no
- * puede absorber el peso de una pila de 200 bolas: se queda vibrando con ~97
- * px/s de residuo. Medido: con la correccion posicional desactivada el residuo
- * cae a 0.7 px/s, asi que toda esa energia viene de ahi.
- *
- * Las 6 iteraciones son el punto donde el solapamiento visible deja de mejorar:
- * con 200 bolas baja a ~25% del radio, contra ~48% con 3.
+ * Iteraciones del solver por subpaso. Con warm starting (ver abajo) unas pocas
+ * alcanzan: los impulsos se heredan del paso anterior, asi que una pila no tiene
+ * que re-converger desde cero cada frame.
  */
-const SOLVER_ITERATIONS = 6;
+const SOLVER_ITERATIONS = 8;
 
 /**
- * Solapamiento tolerado antes de corregir la posicion.
- *
- * Subirlo (se probo con 1.5px) reduce el jitter pero deja las bolasVisiblemente
- * traspasadas: 56% del radio con 200 bolas, contra 25% con 0.05px. El jitter
- * residual es preferible a que se vea como se cruzan.
+ * Holgura: solapamiento tolerado antes de que la correccion de posicion empuje.
+ * Un valor chico evita que se vean bolas traspasadas; no puede ser cero porque
+ * entonces cada contacto empuja y el sistema nunca queda quieto.
  */
-const CONTACT_SLOP = 0.05;
-const CORRECTION = 0.8;
+const SLOP = 0.35;
 
 /**
- * Modelo de bola solida: la masa es proporcional al area y el momento de
- * inercia I = (2/5) m r^2 = (2/5) r^4.
- *
- * La velocidad del punto de contacto de una bola es `v + spin * r * t`. Cuando
- * un impulso jt se aplica en el contacto, `v` cambia en `jt/m` y `spin` en
- * `5 jt / (2 r^3)`, asi que el contacto cambia en `(7/2) jt / r^2`. De ahi sale
- * el 2/7 que usa `wallFriction`: el impulso exacto que mata el deslizamiento.
+ * La penetracion se resuelve moviendo posiciones, no cambiando velocidades. Es
+ * la version "split" de la correccion: al no tocar la velocidad no inyecta
+ * energia cinetica (el asentamiento no puede autoacelerarse). Con warm starting
+ * la penetracion es chica, asi que la correccion tambien.
  */
-const SPIN_TO_SLIP = 7 / 2;
+const POSITION_CORRECTION = 0.25;
+const POSITION_ITERATIONS = 3;
+
+/** Margen para no perder un contacto que se acaba de separar por epsilon. */
+const CONTACT_MARGIN = 0.5;
 
 /**
- * Respuesta angular de un impulso tangencial. Con I = (2/5) m r^2, un impulso
- * `jt` en el contacto produce `spin += SPIN_FROM_TANGENTIAL * jt / (m * r)`.
+ * Restitucion que se desvanece en impactos lentos: por debajo de esta velocidad
+ * el rebote tiende a cero. Sin esto una pila asentada se autoalimenta (la
+ * gravedad acerca, el rebote separa, y el conjunto vibra para siempre).
  */
-const SPIN_FROM_TANGENTIAL = 2.5;
+const REST_VELOCITY = 110;
+const WALL_RESTITUTION = 0.52;
+const BALL_RESTITUTION = 0.42;
 
-/** Aplica un impulso tangencial `jt` sobre la tangente `t` en el punto de contacto. */
-function applyTangential(b: Ball, tx: number, ty: number, jt: number): void {
-  const m = b.r * b.r;
-  b.vx += (jt / m) * tx;
-  b.vy += (jt / m) * ty;
-  b.spin += (SPIN_FROM_TANGENTIAL * jt) / (m * b.r);
-}
+/** Friccion de Coulomb. El tope es la fuerza normal acumulada del contacto. */
+const MU_WALL = 0.55;
+const MU_BALL = 0.32;
 
 /**
- * Restitucion por debajo de REST_VELOCITY.
- *
- * Sin esto una pila asentada se autoalimenta: la correccion posicional separa
- * dos bolas, la gravedad las vuelve a acercar, el choque las separa otra vez, y
- * el conjunto queda vibrando para siempre con velocidades de 50 px/s que nunca
- * bajan de SLEEP_SPEED.
- *
- * La caida es lineal, no un corte: un corte duro deja un escalon que el solver
- * sigue empujando. Con esta curva el restitucion tiende a 0 en el impacto mas
- * leve, que es justo donde tiene que estar.
- */
-const REST_VELOCITY = 120;
-
-function restitutionFor(impact: number, e: number): number {
-  if (impact >= REST_VELOCITY) return e;
-  if (impact <= 0) return 0;
-  return e * (impact / REST_VELOCITY);
-}
-
-/** Friccion de Coulomb en los contactos, bola-muro y bola-bola. */
-const MU_WALL = 0.65;
-const MU_BALL = 0.35;
-
-/**
- * Amortiguacion del giro en contactos reales. Solo toca `spin`, nunca la
- * traslacion: frenar la velocidad del centro en nombre de la rodadura achata
- * las trayectorias y mata la circulacion. Se aplica una vez por subpaso.
- */
-const CONTACT_SPIN_DAMP = 3.0;
-
-/**
- * Arrastre del aire puesto en movimiento por el tambor. Es un acoplamiento
- * viscoso y suave hacia la circulacion local, no una patada por bola: no mete
- * momento de golpe, lleva la direccion tangente correcta y se anula en el
- * centro. La reaccion la absorbe el motor del bombo, que es externo.
+ * Aire arrastrado por el tambor. No es una fuerza por bola ni una sacudida
+ * aleatoria: es una corriente hacia la que las bolas se acoplan de forma
+ * viscosa. Solo sopla en la base: si se aplica en todo el volumen, una bola que
+ * queda en el medio recibe una componente vertical que compite con la gravedad
+ * y se ve flotando. En la base empuja la pila contra el piso, que es donde el
+ * giro tiene que notarse. La reaccion la absorbe el motor del bombo, externo.
  */
 const AIR_COUPLING = 0.8;
 const AIR_RATE = 2.8;
 const AIR_SPIN_RATE = 2.8;
-
+/** Banda vertical (fraccion de R por debajo del centro) donde actua el aire. */
+const AIR_BOTTOM_START = 0.2;
+const AIR_BOTTOM_FULL = 0.7;
 /**
- * Umbral de reposo. El valor alto (90 px/s) parece un error y NO LO ES.
- *
- * El residuo de una pila asentada anda en ~40-100 px/s: es el jitter del solver,
- * no movimiento real. Con un umbral "razonable" de 7 px/s ninguna bola llega
- * nunca a dormir y el bombo queda con shimmer eterno. Con 90, la pila se
- * congela.
- *
- * Lo que hace seguro ese umbral tan alto es `supported`: una bola solo duerme
- * si algo la esta sosteniendo con un impulso capaz de cancelar su peso. Una
- * bola que cae lento va por debajo del umbral igual que una asentada, pero no
- * recibe impulsos de apoyo, asi que nunca se congela en el aire.
+ * El aire de la base se prolonga por el flanco izquierdo, que es el lado por el
+ * que suben las bolas con el giro normal. Si la corriente corta en el fondo, al
+ * salir de ahi la unica fuerza es el roce del muro y pierden el impulso enseguida.
  */
-const SLEEP_SPEED = 90;
-const SLEEP_SPIN = 0.6;
-const SLEEP_DELAY = 0.22;
+const AIR_LEFT_START = 0.3;
+const AIR_LEFT_FULL = 0.7;
+/** Altura a la que el flanco deja de soplar: no llega a la parte de arriba. */
+const AIR_LEFT_TOP_START = 0.15;
+const AIR_LEFT_TOP_FADE = 0.6;
 
 /**
- * Un contacto tiene que apuntar claramente hacia abajo para contar como
- * apoyo. El epsilon evita que un roce casi lateral congele una bola que en
- * realidad esta cayendo de costado.
+ * Reposo. Con warm starting el residuo de una pila asentada baja de decenas a
+ * unos pocos px/s, asi que el umbral puede ser realista en vez de un parche.
+ * La condicion `supported` es la que impide congelar una bola que cae lento: sin
+ * apoyo no se duerme, por debajo del umbral o no.
  */
-const CONTACT_SUPPORT_EPS = 0.12;
+const SLEEP_SPEED = 20;
+const SLEEP_SPIN = 0.7;
+const SLEEP_DELAY = 0.5;
+
+/** Velocidad relativa a la que un choque despierta a una bola dormida. */
+const WAKE_SPEED = 35;
 
 /**
- * Holgura del contacto que sostiene, como fraccion del radio. Chico: si una
- * bola no tiene a NADIE debajo a esta distancia, esta de verdad sola en el aire
- * y congelarla seria el bug que el flag `supported` existe para evitar.
- */
-const SUPPORT_MARGIN = 0.14;
-
-/**
- * Agitacion por encima de la cual nadie duerme.
- *
- * No es lo mismo "el bombo gira" que "el bombo esta apenas vivo". Durante el
- * vaciado la agitacion es 0.06: demasiado poco para circular, pero bastante
- * para que la sacudida no pare, y con el tope en 0.001 las bolas no dormian
- * nunca. Medido: 26 de cada 50 quedantes temblaban a 12-120 px/s durante toda
- * la eyeccion.
+ * Agitacion por encima de la cual nadie duerme. Durante el vaciado la agitacion
+ * no es cero (da sacudida), y con un tope demasiado bajo las bolas quedarian
+ * dormidas mientras el bombo aun sacude.
  */
 const WAKE_AGITATION = 0.25;
 
-export const MIN_BALL_R = 7;
-export const MAX_BALL_R = 42;
+/**
+ * Una normal tiene que apuntar claramente hacia arriba para contar como apoyo.
+ * Un roce casi lateral no sostiene contra la gravedad.
+ */
+const CONTACT_SUPPORT_EPS = 0.1;
 
 export interface Ball {
   id: string;
@@ -154,35 +129,15 @@ export interface Ball {
   y: number;
   vx: number;
   vy: number;
-  /** Velocidad angular (rad/s) en el sentido antihorario. */
+  /** Velocidad angular (rad/s). */
   spin: number;
   /** Cuanto lleva quieta, en segundos de reloj. Llega a SLEEP_DELAY y se congela. */
   still: number;
-  /**
-   * Alguien la esta sosteniendo ahora mismo: un impulso normal al menos capaz de
-   * cancelar su peso en un subpaso. Lo recalcula el solver en cada paso.
-   *
-   * Sin esto no hay forma de distinguir "una bola que ya se asento" de "una
-   * bola que cae muy lento": las dos estan por debajo de SLEEP_SPEED, pero
-   * dormir la segunda la dejaria flotando en el aire del bombo.
-   */
+  /** Algo la sostiene ahora mismo. Solo con apoyo una bola puede dormirse. */
   supported: boolean;
-  /**
-   * Ya salio del bombo y no participa mas de la simulacion.
-   *
-   * El renderer deja de dibujarla, pero mientras siga en `world.balls` sigue
-   * ocupando espacio y empujando a las demas: el hueco de una eyeccion nunca se
-   * abria y las que quedaban no se reacomodaban.
-   */
+  /** Ya salio del bombo y no participa mas de la simulacion ni de la rejilla. */
   gone: boolean;
-  /**
-   * Congelada de verdad: el solver la saltea por completo.
-   *
-   * No alcanza con ponerle la velocidad en cero. `integrate` le seguia aplicando
-   * gravedad,deriveda unas decimas de pixel por segundo hacia abajo, perdia el
-   * contacto, se despertaba y volvia a caer: un ciclo lento que en pantalla se
-   * ve como una bola flotando y tiritando en el aire.
-   */
+  /** Congelada de verdad: la integracion y el solver la saltean. */
   sleeping: boolean;
   r: number;
   hue: number;
@@ -197,21 +152,69 @@ interface Grid {
   items: Int32Array;
 }
 
+/**
+ * Restriccion de contacto persistente entre frames. Es la pieza que permite el
+ * warm starting: guarda los impulsos normal y tangencial acumulados del paso
+ * anterior y los vuelve a aplicar al principio del siguiente. Sin esto, una pila
+ * re-resuelve desde cero en cada frame y no alcanza a soportar su propio peso.
+ */
+interface Contact {
+  a: number;
+  b: number;
+  wall: boolean;
+  nx: number;
+  ny: number;
+  /** Brazo de palanca del punto de contacto respecto del centro de cada bola. */
+  rax: number;
+  ray: number;
+  rbx: number;
+  rby: number;
+  /** Velocidad de la superficie del muro en el punto de contacto. */
+  wx: number;
+  wy: number;
+  /** Impulsos acumulados (warm starting), normal y tangencial. */
+  pn: number;
+  pt: number;
+  friction: number;
+  /** Velocidad normal objetivo del contacto (restitucion; 0 en impactos lentos). */
+  targetVn: number;
+  /** Masas inversas y rigideces efectivas, recalculadas una vez por subpaso. */
+  invMa: number;
+  invMb: number;
+  invIa: number;
+  invIb: number;
+  kn: number;
+  kt: number;
+  frame: number;
+}
+
 export interface World {
   cx: number;
   cy: number;
   R: number;
   balls: Ball[];
-  /** Tope de bolas: la rejilla se dimensiona con esto, no con balls.length. */
+  /** Tope de bolas: la rejilla y los buffers se dimensionan con esto. */
   maxBalls: number;
   agitation: number;
   spinRate: number;
   spinPhase: number;
   grid: Grid;
+  contacts: Map<number, Contact>;
+  contactList: Contact[];
+  pool: Contact[];
+  frame: number;
+  /** Masas inversas por indice de bola (0 = dormida o estatica). */
+  invMass: Float64Array;
+  invI: Float64Array;
 }
 
 function clamp(value: number, min: number, max: number): number {
   return value < min ? min : value > max ? max : value;
+}
+
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 function makeGrid(R: number, maxBalls: number): Grid {
@@ -226,7 +229,35 @@ function makeGrid(R: number, maxBalls: number): Grid {
   };
 }
 
+function makeContact(): Contact {
+  return {
+    a: 0,
+    b: 0,
+    wall: false,
+    nx: 0,
+    ny: 1,
+    rax: 0,
+    ray: 0,
+    rbx: 0,
+    rby: 0,
+    wx: 0,
+    wy: 0,
+    pn: 0,
+    pt: 0,
+    friction: 0,
+    targetVn: 0,
+    invMa: 0,
+    invMb: 0,
+    invIa: 0,
+    invIb: 0,
+    kn: 0,
+    kt: 0,
+    frame: 0,
+  };
+}
+
 export function createWorld(cx: number, cy: number, R: number, maxBalls = 200): World {
+  const capacity = Math.max(1, maxBalls);
   return {
     cx,
     cy,
@@ -236,22 +267,34 @@ export function createWorld(cx: number, cy: number, R: number, maxBalls = 200): 
     agitation: 0,
     spinRate: 4.6,
     spinPhase: 0,
-    grid: makeGrid(R, maxBalls),
+    grid: makeGrid(R, capacity),
+    contacts: new Map<number, Contact>(),
+    contactList: [],
+    pool: [],
+    frame: 0,
+    invMass: new Float64Array(capacity),
+    invI: new Float64Array(capacity),
   };
 }
 
-/** Reubica el bombo y reconstruye la rejilla, que depende del radio.
- *  Ojo: el buffer de items se dimensiona con maxBalls. Si usara balls.length,
- *  un resize antes de poblar dejarÃ­a el buffer en 1 y el solver descartarÃ­a
- *  silenciosamente casi todas las bolas (Int32Array ignora escrituras fuera
- *  de rango), dejando el bombo sin colisiones. */
+function clearContacts(world: World): void {
+  world.contacts.clear();
+  world.pool.length = 0;
+  world.contactList.length = 0;
+}
+
+/**
+ * Reubica el bombo y reconstruye la rejilla, que depende del radio. El buffer de
+ * items se dimensiona con maxBalls: si usara balls.length, un resize antes de
+ * poblar dejaria casi todas las bolas fuera de la rejilla.
+ */
 export function resizeWorld(world: World, cx: number, cy: number, R: number): void {
   world.cx = cx;
   world.cy = cy;
   world.R = R;
-  world.grid = makeGrid(R, world.maxBalls);
+  world.grid = makeGrid(R, Math.max(1, world.maxBalls));
+  clearContacts(world);
 }
-
 
 /** Radio uniforme para que `count` bolas entren en el bombo sin saturarlo. */
 export function ballRadiusFor(count: number, R: number): number {
@@ -259,7 +302,7 @@ export function ballRadiusFor(count: number, R: number): number {
   return clamp(R * Math.sqrt(PACKING / count), MIN_BALL_R, MAX_BALL_R);
 }
 
-/** RetÃ­cula hexagonal dentro del cÃ­rculo: densidad ~0.9, sin posiciones repetidas. */
+/** Reticula hexagonal dentro del circulo: densidad alta, sin posiciones repetidas. */
 function latticeSlots(world: World, r: number): { x: number; y: number }[] {
   const maxD = Math.max(0, world.R - r);
   const spacing = r * 2.04;
@@ -280,9 +323,9 @@ function latticeSlots(world: World, r: number): { x: number; y: number }[] {
 }
 
 /**
- * Cuanto mas chica la bola, mas corta la etiqueta. Con muchas participantes
- * un nombre completo no entra ni se lee en un stream, asi que caemos a
- * iniciales; si tampoco entra, la bola va sin texto.
+ * Cuanto mas chica la bola, mas corta la etiqueta. Con muchas participantes un
+ * nombre completo no entra ni se lee en un stream, asi que caemos a iniciales;
+ * si tampoco entra, la bola va sin texto.
  */
 export function displayLabelFor(label: string, r: number): string {
   if (!label) return '';
@@ -299,16 +342,46 @@ export function displayLabelFor(label: string, r: number): string {
   return '';
 }
 
+function newBall(
+  item: ParticipantItem,
+  r: number,
+  x: number,
+  y: number,
+  vx: number,
+  vy: number,
+  hue: number,
+  spawnAt: number,
+): Ball {
+  return {
+    id: item.id,
+    label: item.label,
+    displayLabel: displayLabelFor(item.label, r),
+    x,
+    y,
+    vx,
+    vy,
+    spin: 0,
+    still: 0,
+    supported: false,
+    gone: false,
+    sleeping: false,
+    r,
+    hue,
+    spawnAt,
+  };
+}
+
 export function populate(world: World, items: readonly ParticipantItem[], rand: RandomSource): void {
+  clearContacts(world);
   const n = items.length;
   if (n === 0) {
     world.balls = [];
     return;
   }
 
-  // Si la retÃ­cula no alcanza para todos los participantes, achicamos las
-  // bolas en vez de reciclar posiciones: dos bolas naciendo en el mismo
-  // punto producen un solapamiento que el solver tarda segundos en digerir.
+  // Si la reticula no alcanza para todos, achicamos las bolas en vez de reciclar
+  // posiciones: dos bolas naciendo en el mismo punto producen un solapamiento que
+  // el solver tarda segundos en digerir.
   let r = ballRadiusFor(n, world.R);
   let spots = latticeSlots(world, r);
   for (let attempt = 0; spots.length < n && r > MIN_BALL_R && attempt < 16; attempt++) {
@@ -323,23 +396,16 @@ export function populate(world: World, items: readonly ParticipantItem[], rand: 
 
   for (let i = 0; i < n; i++) {
     const spot = chosen[i % chosen.length]!;
-    balls[i] = {
-      id: items[i]!.id,
-      label: items[i]!.label,
-      displayLabel: displayLabelFor(items[i]!.label, r),
-      x: clamp(spot.x + (rand() - 0.5) * jitter, world.cx - maxD, world.cx + maxD),
-      y: clamp(spot.y + (rand() - 0.5) * jitter, world.cy - maxD, world.cy + maxD),
-      vx: (rand() - 0.5) * 240,
-      vy: 120 + rand() * 260,
-      spin: 0,
-      still: 0,
-      supported: false,
-      gone: false,
-      sleeping: false,
+    balls[i] = newBall(
+      items[i]!,
       r,
-      hue: (i * 137.508) % 360,
-      spawnAt: 0,
-    };
+      clamp(spot.x + (rand() - 0.5) * jitter, world.cx - maxD, world.cx + maxD),
+      clamp(spot.y + (rand() - 0.5) * jitter, world.cy - maxD, world.cy + maxD),
+      (rand() - 0.5) * 240,
+      120 + rand() * 260,
+      (i * 137.508) % 360,
+      0,
+    );
   }
 
   world.balls = balls;
@@ -351,9 +417,9 @@ export const SPAWN_DURATION = 0.35;
  * Inserta una bola suelta sin reconstruir el bombo ni tocar las demas. Se usa
  * cuando alguien se anota por chat mientras la tombola esta en reposo.
  *
- * El radio se recalcula segun cuantos hay para que el conjunto siga entrando;
- * si las bolas existentes tenian otro radio, se ajustan todas de golpe (solo
- * pasa mientras la tombola esta quieta, asi que no se nota).
+ * El radio se recalcula segun cuantos hay para que el conjunto siga entrando; si
+ * las bolas existentes tenian otro radio, se ajustan todas de golpe (solo pasa
+ * mientras la tombola esta quieta, asi que no se nota).
  *
  * Devuelve el indice de la bola nueva, o -1 si el bombo esta lleno.
  */
@@ -366,7 +432,7 @@ export function addBall(
   if (world.balls.length >= world.maxBalls) return -1;
 
   const target = ballRadiusFor(world.balls.length + 1, world.R);
-  const changed = Math.abs(world.balls[0]!.r - target) > 0.5;
+  const changed = world.balls.length > 0 && Math.abs(world.balls[0]!.r - target) > 0.5;
   for (const b of world.balls) b.r = target;
 
   const maxD = Math.max(0, world.R - target);
@@ -397,24 +463,18 @@ export function addBall(
     y = world.cy - maxD;
   }
 
-  world.balls.push({
-    id: item.id,
-    label: item.label,
-    displayLabel: displayLabelFor(item.label, target),
-    x: clamp(x, world.cx - maxD, world.cx + maxD),
-    y: clamp(y, world.cy - maxD, world.cy + maxD),
-    vx: (rand() - 0.5) * 160,
-    vy: -120 - rand() * 180,
-    spin: 0,
-    still: 0,
-    supported: false,
-    gone: false,
-    sleeping: false,
-    r: target,
-    hue: (world.balls.length * 137.508) % 360,
-    spawnAt: changed ? clock - SPAWN_DURATION : clock,
-  });
+  const ball = newBall(
+    item,
+    target,
+    clamp(x, world.cx - maxD, world.cx + maxD),
+    clamp(y, world.cy - maxD, world.cy + maxD),
+    (rand() - 0.5) * 160,
+    -120 - rand() * 180,
+    (world.balls.length * 137.508) % 360,
+    changed ? clock - SPAWN_DURATION : clock,
+  );
 
+  world.balls.push(ball);
   return world.balls.length - 1;
 }
 
@@ -424,146 +484,14 @@ export function spawnProgressOf(ball: Ball, clock: number): number {
   return t <= 0 ? 0 : t >= 1 ? 1 : t;
 }
 
-/**
- * El giro entra solo por contacto con el muro: no hay campo global que empuje
- * a las bolas sueltas ni sacudida aleatoria por bola. Esa era la fuente de los
- * efectos raros: aceleraba el interior sin contacto, no movia el giro de cada
- * bola y metia momento lineal aleatorio en cada evento. La circulacion interior
- * tiene que propagarse por choques y friccion, como en el bombo real.
- */
-function integrate(world: World, dt: number): void {
-  const dragK = Math.max(0, 1 - DRAG * dt);
-  const flowOmega = world.spinRate * world.agitation * AIR_COUPLING;
-  const flowK = flowOmega !== 0 ? 1 - Math.exp(-AIR_RATE * dt) : 0;
-  const spinK = flowOmega !== 0 ? 1 - Math.exp(-AIR_SPIN_RATE * dt) : 0;
+// --- Rejilla espacial ------------------------------------------------------
 
-  for (const b of world.balls) {
-    if (b.gone || b.sleeping) continue;
-    b.vy += GRAVITY * dt;
-    b.vx *= dragK;
-    b.vy *= dragK;
-    // El giro se frena un poco mas fuerte que el translational: una bola que
-    // rueda sin rodar se nota.
-    b.spin *= Math.max(0, 1 - DRAG * 1.6 * dt);
-
-    // Circulacion de aire arrastrado por el tambor. Es pequena frente a la
-    // gravedad, asi que no suspende bolas: solo orienta el conjunto.
-    if (flowK > 0) {
-      const dx = b.x - world.cx;
-      const dy = b.y - world.cy;
-      const flowVx = -flowOmega * dy;
-      const flowVy = flowOmega * dx;
-      b.vx += (flowVx - b.vx) * flowK;
-      b.vy += (flowVy - b.vy) * flowK;
-      b.spin += (flowOmega - b.spin) * spinK;
-    }
-
-    const speed = Math.hypot(b.vx, b.vy);
-    if (speed > MAX_SPEED) {
-      const k = MAX_SPEED / speed;
-      b.vx *= k;
-      b.vy *= k;
-    }
-
-    b.x += b.vx * dt;
-    b.y += b.vy * dt;
-  }
-}
-
-/**
- * El bombo girando arrastra a las bolas por friccion contra el muro.
- *
- * La velocidad del punto de contacto de la bola es `v + spin*r*t`; la del muro
- * es `omega*R*t`. La diferencia es el deslizamiento. El impulso intenta
- * anularlo, pero topado por Coulomb con la carga normal del contacto: una bola
- * apenas apoyada patina, y una bola apretada contra el muro se acopla mas.
- * Ese tope es lo que evita el arrastre perfecto y la centrifuga irreal.
- */
-function wallDrive(
-  b: Ball,
-  tx: number,
-  ty: number,
-  omega: number,
-  R: number,
-  maxImpulse: number,
-): void {
-  const m = b.r * b.r;
-  const slip = b.vx * tx + b.vy * ty + b.spin * b.r - omega * R;
-
-  let jt = -(m * slip) / SPIN_TO_SLIP;
-  if (jt > maxImpulse) jt = maxImpulse;
-  else if (jt < -maxImpulse) jt = -maxImpulse;
-
-  applyTangential(b, tx, ty, jt);
-}
-
-/**
- * Mantiene cada bola dentro del tambor. Se aplica DESPUES de resolver
- * colisiones, porque separar bolas puede empujarlas contra el muro.
- *
- * El acople del giro se aplica una sola vez por subpaso: repetir el impulso
- * que anula el deslizamiento en cada iteracion del solver equivale a ignorar
- * el tope de Coulomb y pega las bolas al muro.
- */
-function constrainToWalls(world: World, omega: number, applyDrive: boolean): void {
-  const { balls, cx, cy, R } = world;
-
-  for (const b of balls) {
-    if (b.gone) continue;
-    const dx = b.x - cx;
-    const dy = b.y - cy;
-    const d = Math.hypot(dx, dy);
-    const limit = R - b.r;
-    if (d < 1e-6) continue;
-
-    const nx = dx / d;
-    const ny = dy / d;
-
-    // Hay contacto un poco antes de cruzar el muro. Sin esta tolerancia, una
-    // bola posada justo en el limite no registra apoyo nunca: el solver la
-    // devuelve exactamente a `limit` cada vez, asi que en el paso siguiente
-    // todavia no hay nada que resolver y `supported` queda siempre en false.
-    const resting = d > limit - CONTACT_SLOP;
-    if (!resting) continue;
-
-    const m = b.r * b.r;
-    let approachImpulse = 0;
-    const vn = b.vx * nx + b.vy * ny;
-
-    if (d > limit) {
-      b.x = cx + nx * limit;
-      b.y = cy + ny * limit;
-
-      if (vn > 0) {
-        const bounce = restitutionFor(vn, WALL_RESTITUTION);
-        approachImpulse = vn * m;
-        // El impulso normal que acaba de recibir es vn*(1+bounce)*m. Si alcanza
-        // a sostener el peso de la bola en un subpaso, algo la esta apuntalando.
-        if (vn * b.r * b.r >= 0.5 * b.r * b.r * GRAVITY * FIXED_DT) b.supported = true;
-        if (b.sleeping) {
-          b.sleeping = false;
-          b.still = 0;
-        }
-        b.vx -= vn * (1 + bounce) * nx;
-        b.vy -= vn * (1 + bounce) * ny;
-      }
-    } else if (Math.abs(vn) < SLEEP_SPEED) {
-      // Apoyada y quieta contra el muro: el contacto la sostiene.
-      b.supported = true;
-    }
-
-    // Una dormida apoyada no recibe friccion hasta que un choque la despierte:
-    // si no, acumularia velocidad sin integrarla.
-    if (!applyDrive || b.sleeping) continue;
-
-    // Carga minima: el peso que el muro sostiene en un subpaso. Sin impacto no
-    // hay impulso normal medido, pero una bola apoyada igual presiona el muro.
-    const maxImpulse = MU_WALL * Math.max(approachImpulse, m * GRAVITY * FIXED_DT);
-    const tx = -ny;
-    const ty = nx;
-    wallDrive(b, tx, ty, omega, R, maxImpulse);
-    b.spin *= Math.max(0, 1 - CONTACT_SPIN_DAMP * FIXED_DT);
-  }
+function cellIndex(b: Ball, world: World, g: Grid): number {
+  const rawX = ((b.x - world.cx + world.R) / g.cellSize) | 0;
+  const rawY = ((b.y - world.cy + world.R) / g.cellSize) | 0;
+  const x = rawX < 0 ? 0 : rawX >= g.cols ? g.cols - 1 : rawX;
+  const y = rawY < 0 ? 0 : rawY >= g.cols ? g.cols - 1 : rawY;
+  return y * g.cols + x;
 }
 
 function buildGrid(world: World): void {
@@ -573,7 +501,7 @@ function buildGrid(world: World): void {
 
   for (const b of world.balls) {
     if (b.gone) continue;
-    g.counts[cellIndex(b, world, g)]! += 1;
+    g.counts[cellIndex(b, world, g)] += 1;
   }
 
   let sum = 0;
@@ -581,7 +509,6 @@ function buildGrid(world: World): void {
     sum += g.counts[c]!;
     g.counts[c] = sum;
   }
-  // counts tiene cells+1 entradas: este es el "fin" de la ultima celda.
   g.counts[cells] = sum;
 
   for (let i = world.balls.length - 1; i >= 0; i--) {
@@ -593,153 +520,9 @@ function buildGrid(world: World): void {
   }
 }
 
-function cellIndex(b: Ball, world: World, g: Grid): number {
-  const rawX = ((b.x - world.cx + world.R) / g.cellSize) | 0;
-  const rawY = ((b.y - world.cy + world.R) / g.cellSize) | 0;
-  const x = rawX < 0 ? 0 : rawX >= g.cols ? g.cols - 1 : rawX;
-  const y = rawY < 0 ? 0 : rawY >= g.cols ? g.cols - 1 : rawY;
-  return y * g.cols + x;
-}
-
-function resolvePair(a: Ball, b: Ball, dampSpin: boolean): void {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const d2 = dx * dx + dy * dy;
-
-  // El contacto que sostiene se busca ANTES del corte por solapamiento, y con
-  // un margen. Si se mirara solo cuando las bolas se pisan, la mayoria no
-  // contaria: la correccion posicional las deja justo a `rsum` de distancia,
-  // donde `d2 >= rsum*rsum` y la funcion vuelve sin hacer nada. Medido: con 57
-  // bolas solo 1 de 57 declaraba apoyo y por eso ninguna llegaba a dormir,
-  // aunque ninguna pasara de 33 px/s.
-  // El margen es holgura extra sobre el contacto real. Sin ella el apoyo se
-  // detecta en el ~93% de los frames y el 7% restante resetea el contador de
-  // quietas antes de que llegue al umbral: medido, `still` se quedaba clavado
-  // en 0.23 con un umbral de 0.22 y casi nada dormia.
-  const supportRange = a.r + b.r + (a.r + b.r) * SUPPORT_MARGIN;
-  if (d2 < supportRange * supportRange) {
-    const sd = Math.sqrt(d2) || 1;
-    const sny = dy / sd;
-    if (sny > CONTACT_SUPPORT_EPS) a.supported = true;
-    else if (sny < -CONTACT_SUPPORT_EPS) b.supported = true;
-  }
-
-  const rsum = a.r + b.r;
-  if (d2 >= rsum * rsum) return;
-
-  let nx: number;
-  let ny: number;
-  let d: number;
-  if (d2 < 1e-9) {
-    nx = 1;
-    ny = 0;
-    d = rsum;
-  } else {
-    d = Math.sqrt(d2);
-    nx = dx / d;
-    ny = dy / d;
-  }
-
-  const ma = a.r * a.r;
-  const mb = b.r * b.r;
-  const total = ma + mb;
-
-  // Contacto que sostiene, se marque o no impulso.
-  //
-  // Antes `supported` solo se activaba con un impulso de verdad (vn < 0), y en
-  // una pila ya asentada muchas parejas no se estan acercando: el contacto
-  // existe pero no genera impulso. Resultado: la pila nunca se declaraba
-  // apoyada, nadie dormia, y el bombo se quedaba temblando para siempre con
-  // velocidades de 1-3 px/s.
-  //
-  // La direccion del contacto dice si sostiene: la normal va de a hacia b, asi
-  // que si b esta debajo de a (ny > 0) el contacto sostiene a `a`. Un contacto
-  // lateral (ny ~ 0), como el de una bola que cae junto al muro, no sostiene a
-  // nadie y la bola sigue cayendo.
-  if (ny > CONTACT_SUPPORT_EPS) a.supported = true;
-  else if (ny < -CONTACT_SUPPORT_EPS) b.supported = true;
-
-  // Correccion posicional ponderada por masa: las bolas livianas ceden mas.
-  const overlap = rsum - d - CONTACT_SLOP;
-  if (overlap > 0) {
-    const push = CORRECTION * overlap;
-    a.x -= nx * push * (mb / total);
-    a.y -= ny * push * (mb / total);
-    b.x += nx * push * (ma / total);
-    b.y += ny * push * (ma / total);
-  }
-
-  const rvx = b.vx - a.vx;
-  const rvy = b.vy - a.vy;
-  const vn = rvx * nx + rvy * ny;
-  if (vn >= 0) return;
-
-  // Choque flojo: el restitucion cae a cero solo, y el tope se alcanza solo con
-  // impactos de verdad.
-  const bounce = restitutionFor(-vn, BALL_RESTITUTION);
-  const impulse = (-(1 + bounce) * vn) / (1 / ma + 1 / mb);
-
-  // El impulso se reparte por la masa efectiva: el que recibe >= la mitad del
-  // suyo tiene con que sostenerse, y puede dormir.
-  if (impulse * (ma / total) >= 0.5 * ma * GRAVITY * FIXED_DT) a.supported = true;
-  if (impulse * (mb / total) >= 0.5 * mb * GRAVITY * FIXED_DT) b.supported = true;
-
-  // Un choque de verdad despierta a las dos.
-  if (a.sleeping) {
-    a.sleeping = false;
-    a.still = 0;
-  }
-  if (b.sleeping) {
-    b.sleeping = false;
-    b.still = 0;
-  }
-
-  a.vx -= (nx * impulse) / ma;
-  a.vy -= (ny * impulse) / ma;
-  b.vx += (nx * impulse) / mb;
-  b.vy += (ny * impulse) / mb;
-
-  // Friccion tangencial entre las dos esferas: el punto de contacto de cada una
-  // lleva su rotacion, y sin esto el giro de una bola nunca le llega a la
-  // otra, asi que se deslizan unas sobre otras sin rodar.
-  const tx = -ny;
-  const ty = nx;
-  // Deslizamiento del contacto de a respecto del contacto de b, en +t.
-  const slip = -(rvx * tx + rvy * ty) + a.spin * a.r + b.spin * b.r;
-
-  // Un impulso jt sobre b en +t (y el opuesto sobre a) cambia el deslizamiento
-  // en -jt * SPIN_TO_SLIP * (1/ma + 1/mb). De ahi el divisor.
-  let jt = slip / (SPIN_TO_SLIP * (1 / ma + 1 / mb));
-
-  // Tope de Coulomb: la friccion tangencial no puede pasar la normal.
-  const cap = MU_BALL * impulse;
-  if (jt > cap) jt = cap;
-  else if (jt < -cap) jt = -cap;
-
-  // Par de reaccion: mismo escalar, sentidos opuestos. Aplicar el mismo signo a
-  // las dos las empuja en la misma direccion e inyecta momento de la nada.
-  b.vx += (jt / mb) * tx;
-  b.vy += (jt / mb) * ty;
-  a.vx -= (jt / ma) * tx;
-  a.vy -= (jt / ma) * ty;
-  // El torque de los dos sale del mismo signo: el contacto esta a +n en a y a
-  // -n en b, y las dos fuerzas son opuestas.
-  b.spin -= (SPIN_FROM_TANGENTIAL * jt) / (mb * b.r);
-  a.spin -= (SPIN_FROM_TANGENTIAL * jt) / (ma * a.r);
-
-  // Rodadura en contacto real: solo se amortigua el giro, una vez por subpaso.
-  if (dampSpin) {
-    const k = Math.max(0, 1 - CONTACT_SPIN_DAMP * FIXED_DT);
-    a.spin *= k;
-    b.spin *= k;
-  }
-}
-
-// Vecindario 3x3 completo. Con el filtro `j > i` de resolveCollisions cada
-// par se resuelve exactamente una vez. Usar solo la mitad del vecindario NO
-// sirve aca: el orden de indices de las bolas es independiente del orden de
-// las celdas, asi que la mitad de los pares entre celdas distintas se
-// descartarian y quedarian bolas superpuestas.
+// Vecindario 3x3 completo. Con el tamano de celda (2 * MAX_BALL_R) alcanza para
+// no perder ningun par que pueda tocarse. El filtro `j > i` resuelve cada par
+// una sola vez.
 const NEIGHBORS = [
   [-1, -1],
   [0, -1],
@@ -752,81 +535,564 @@ const NEIGHBORS = [
   [1, 1],
 ] as const;
 
-function resolveCollisions(world: World, dampSpin: boolean): void {
+// --- Contactos -------------------------------------------------------------
+
+function contactFor(world: World, key: number): Contact {
+  const existing = world.contacts.get(key);
+  if (existing) {
+    existing.frame = world.frame;
+    return existing;
+  }
+  const c = world.pool.pop() ?? makeContact();
+  c.frame = world.frame;
+  c.pn = 0;
+  c.pt = 0;
+  world.contacts.set(key, c);
+  return c;
+}
+
+/** Despierta a una bola dormida si el otro cuerpo la golpea de verdad. */
+function maybeWake(a: Ball, b: Ball): void {
+  if (a.sleeping === b.sleeping) return;
+  const sleeper = a.sleeping ? a : b;
+  const other = a.sleeping ? b : a;
+  const rel = Math.hypot(other.vx - sleeper.vx, other.vy - sleeper.vy);
+  if (rel > WAKE_SPEED) {
+    sleeper.sleeping = false;
+    sleeper.still = 0;
+  }
+}
+
+/**
+ * Reune los contactos del subpaso. La geometria se congela aca: el solver y el
+ * warm starting corren sobre estos datos y recien despues se integran las
+ * posiciones.
+ */
+function gatherContacts(world: World, omega: number): void {
   buildGrid(world);
+  world.contactList.length = 0;
+
   const g = world.grid;
   const cols = g.cols;
   const balls = world.balls;
+  const wallKeyBase = world.maxBalls * world.maxBalls;
+  const ballKeyMul = world.maxBalls;
 
   for (let i = 0; i < balls.length; i++) {
     const a = balls[i]!;
-    // Las que ya salieron ni se consultan. Las demas tampoco las encountera
-    // nadie: buildGrid no las mete en la rejilla, asi que `j` nunca es una.
     if (a.gone) continue;
+
     const rawX = ((a.x - world.cx + world.R) / g.cellSize) | 0;
     const rawY = ((a.y - world.cy + world.R) / g.cellSize) | 0;
 
-    for (const [ox, oy] of NEIGHBORS) {
+    for (let n = 0; n < NEIGHBORS.length; n++) {
+      const ox = NEIGHBORS[n]![0];
+      const oy = NEIGHBORS[n]![1];
       const gx = rawX + ox;
       const gy = rawY + oy;
       if (gx < 0 || gy < 0 || gx >= cols || gy >= cols) continue;
 
       const cell = gy * cols + gx;
-      for (let k = g.counts[cell]!; k < g.counts[cell + 1]!; k++) {
+      const start = g.counts[cell]!;
+      const end = g.counts[cell + 1]!;
+      for (let k = start; k < end; k++) {
         const j = g.items[k]!;
-        if (j > i) resolvePair(a, balls[j]!, dampSpin);
+        if (j <= i) continue;
+        const b = balls[j]!;
+        if (b.gone) continue;
+
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const rsum = a.r + b.r;
+        const reach = rsum + CONTACT_MARGIN;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > reach * reach) continue;
+
+        let nx: number;
+        let ny: number;
+        let d: number;
+        if (d2 < 1e-12) {
+          nx = 1;
+          ny = 0;
+          d = 0;
+        } else {
+          d = Math.sqrt(d2);
+          nx = dx / d;
+          ny = dy / d;
+        }
+
+        maybeWake(a, b);
+
+        const c = contactFor(world, i * ballKeyMul + j);
+        c.wall = false;
+        c.a = i;
+        c.b = j;
+        c.nx = nx;
+        c.ny = ny;
+        c.rax = nx * a.r;
+        c.ray = ny * a.r;
+        c.rbx = -nx * b.r;
+        c.rby = -ny * b.r;
+        c.wx = 0;
+        c.wy = 0;
+        c.friction = MU_BALL;
+        c.targetVn = d - rsum;
+        world.contactList.push(c);
       }
+    }
+  }
+
+  // Muro: la normal apunta hacia el centro (hacia adentro). La bola esta afuera
+  // de ese plano cuando d > R - r.
+  for (let i = 0; i < balls.length; i++) {
+    const b = balls[i]!;
+    if (b.gone) continue;
+
+    const dx = b.x - world.cx;
+    const dy = b.y - world.cy;
+    const d = Math.hypot(dx, dy);
+    const limit = world.R - b.r;
+    if (d < limit - CONTACT_MARGIN) continue;
+
+    let nx: number;
+    let ny: number;
+    if (d < 1e-9) {
+      nx = 0;
+      ny = -1;
+    } else {
+      nx = -dx / d;
+      ny = -dy / d;
+    }
+
+    const c = contactFor(world, wallKeyBase + i);
+    c.wall = true;
+    c.a = -1;
+    c.b = i;
+    c.nx = nx;
+    c.ny = ny;
+    c.rax = 0;
+    c.ray = 0;
+    c.rbx = -nx * b.r;
+    c.rby = -ny * b.r;
+
+    // Velocidad de la superficie del muro en el punto de contacto: omega x r.
+    const cpx = b.x + c.rbx;
+    const cpy = b.y + c.rby;
+    c.wx = -omega * (cpy - world.cy);
+    c.wy = omega * (cpx - world.cx);
+    c.friction = MU_WALL;
+    c.targetVn = limit - d;
+
+    world.contactList.push(c);
+  }
+}
+
+/**
+ * Precalcula masas inversas, rigideces efectivas y la velocidad normal objetivo
+ * (restitucion) de cada contacto. Se hace una vez por subpaso: durante las
+ * iteraciones del solver ninguna de esas cantidades cambia.
+ */
+function prepareStep(world: World): void {
+  const balls = world.balls;
+  const capacity = world.invMass.length;
+
+  for (let i = 0; i < balls.length && i < capacity; i++) {
+    const b = balls[i]!;
+    if (b.gone || b.sleeping) {
+      world.invMass[i] = 0;
+      world.invI[i] = 0;
+      continue;
+    }
+    const r2 = b.r * b.r;
+    const invM = 1 / r2;
+    world.invMass[i] = invM;
+    // Disco solido: I = (1/2) m r^2 => invI = 2 / (m r^2).
+    world.invI[i] = (2 * invM) / r2;
+  }
+
+  const list = world.contactList;
+  for (let k = 0; k < list.length; k++) {
+    const c = list[k]!;
+    const invMb = world.invMass[c.b]!;
+    const invIb = world.invI[c.b]!;
+    const invMa = c.wall ? 0 : world.invMass[c.a]!;
+    const invIa = c.wall ? 0 : world.invI[c.a]!;
+
+    c.invMa = invMa;
+    c.invMb = invMb;
+    c.invIa = invIa;
+    c.invIb = invIb;
+    c.kn = invMa + invMb;
+    c.kt =
+      invMa +
+      invMb +
+      invIa * (c.rax * c.rax + c.ray * c.ray) +
+      invIb * (c.rbx * c.rbx + c.rby * c.rby);
+
+    // Un contacto con una bola dormida es estatico: no se hereda impulso,
+    // porque al despertar la bola esos impulsos ya no corresponden a nada. El
+    // muro no entra aca: es siempre estatico, pero su contacto SI acumula, que
+    // es lo que sostiene la pila.
+    if (invMb === 0 || (!c.wall && invMa === 0)) {
+      c.pn = 0;
+      c.pt = 0;
+    }
+
+    const impact = contactApproach(c, balls);
+    const e = c.wall ? WALL_RESTITUTION : BALL_RESTITUTION;
+    let restBias = 0;
+    if (impact > 0) {
+      restBias =
+        impact >= REST_VELOCITY ? e * impact : (e * impact * impact) / REST_VELOCITY;
+    }
+    c.targetVn = restBias;
+  }
+}
+
+/** Velocidad normal de aproximacion (positiva = se acercan). */
+function contactApproach(c: Contact, balls: Ball[]): number {
+  const B = balls[c.b]!;
+  const bvx = B.vx - B.spin * c.rby;
+  const bvy = B.vy + B.spin * c.rbx;
+  let avx = 0;
+  let avy = 0;
+  if (!c.wall && c.invMa > 0) {
+    const A = balls[c.a]!;
+    avx = A.vx - A.spin * c.ray;
+    avy = A.vy + A.spin * c.rax;
+  }
+  const wallVx = c.wall ? c.wx : 0;
+  const wallVy = c.wall ? c.wy : 0;
+  const rvx = bvx - avx - wallVx;
+  const rvy = bvy - avy - wallVy;
+  return -(rvx * c.nx + rvy * c.ny);
+}
+
+/**
+ * Warm starting: vuelve a aplicar los impulsos acumulados del paso anterior,
+ * repartidos entre los dos cuerpos. Es lo que hace que una pila de 200 bolas
+ * herede el apoyo en vez de re-converger desde cero en cada frame.
+ */
+function warmStart(world: World): void {
+  const balls = world.balls;
+  const list = world.contactList;
+  for (let k = 0; k < list.length; k++) {
+    const c = list[k]!;
+    if (c.pn === 0 && c.pt === 0) continue;
+    if (c.invMa + c.invMb === 0) continue;
+
+    const tx = -c.ny;
+    const ty = c.nx;
+    const px = c.pn * c.nx + c.pt * tx;
+    const py = c.pn * c.ny + c.pt * ty;
+    applyPair(c, balls, px, py);
+  }
+}
+
+function applyPair(c: Contact, balls: Ball[], px: number, py: number): void {
+  const B = balls[c.b]!;
+  B.vx += px * c.invMb;
+  B.vy += py * c.invMb;
+  B.spin += c.invIb * (c.rbx * py - c.rby * px);
+
+  if (c.invMa > 0) {
+    const A = balls[c.a]!;
+    A.vx -= px * c.invMa;
+    A.vy -= py * c.invMa;
+    A.spin += c.invIa * (c.rax * -py - c.ray * -px);
+  }
+}
+
+function solveAll(world: World): void {
+  const balls = world.balls;
+  const list = world.contactList;
+
+  for (let k = 0; k < list.length; k++) {
+    const c = list[k]!;
+    if (c.kn <= 0) continue;
+
+    const B = balls[c.b]!;
+
+    // --- Normal ---
+    let bvx = B.vx - B.spin * c.rby;
+    let bvy = B.vy + B.spin * c.rbx;
+    let avx = 0;
+    let avy = 0;
+    if (c.invMa > 0) {
+      const A = balls[c.a]!;
+      avx = A.vx - A.spin * c.ray;
+      avy = A.vy + A.spin * c.rax;
+    }
+    const wvx = c.wall ? c.wx : 0;
+    const wvy = c.wall ? c.wy : 0;
+    let rvx = bvx - avx - wvx;
+    let rvy = bvy - avy - wvy;
+    const vn = rvx * c.nx + rvy * c.ny;
+
+    let dPn = (c.targetVn - vn) / c.kn;
+    let newPn = c.pn + dPn;
+    if (newPn < 0) newPn = 0;
+    dPn = newPn - c.pn;
+    c.pn = newPn;
+    if (dPn !== 0) applyPair(c, balls, dPn * c.nx, dPn * c.ny);
+
+    // --- Tangencial (friccion de Coulomb) ---
+    if (c.kt <= 0 || c.pn <= 0) continue;
+
+    bvx = B.vx - B.spin * c.rby;
+    bvy = B.vy + B.spin * c.rbx;
+    avx = 0;
+    avy = 0;
+    if (c.invMa > 0) {
+      const A = balls[c.a]!;
+      avx = A.vx - A.spin * c.ray;
+      avy = A.vy + A.spin * c.rax;
+    }
+    rvx = bvx - avx - wvx;
+    rvy = bvy - avy - wvy;
+    const tx = -c.ny;
+    const ty = c.nx;
+    const vt = rvx * tx + rvy * ty;
+
+    let dPt = -vt / c.kt;
+    const maxPt = c.friction * c.pn;
+    let newPt = c.pt + dPt;
+    if (newPt > maxPt) newPt = maxPt;
+    else if (newPt < -maxPt) newPt = -maxPt;
+    dPt = newPt - c.pt;
+    c.pt = newPt;
+    if (dPt !== 0) applyPair(c, balls, dPt * tx, dPt * ty);
+  }
+}
+
+function integratePositions(world: World, h: number): void {
+  const { balls, cx, cy, R } = world;
+  for (let i = 0; i < balls.length; i++) {
+    const b = balls[i]!;
+    if (b.gone || b.sleeping) continue;
+
+    b.x += b.vx * h;
+    b.y += b.vy * h;
+
+    // Red de seguridad: el solver ya empuja hacia adentro, pero una posicion
+    // fuera del bombo en un frame no puede llegar nunca al render.
+    const dx = b.x - cx;
+    const dy = b.y - cy;
+    const d = Math.hypot(dx, dy);
+    const limit = R - b.r;
+    if (d > limit && d > 1e-6) {
+      b.x = cx + (dx / d) * limit;
+      b.y = cy + (dy / d) * limit;
     }
   }
 }
 
+/**
+ * Resuelve la penetracion moviendo posiciones. Corre despues de integrar y no
+ * toca velocidades, asi que no puede inyectar energia. Con warm starting la
+ * penetracion de una pila es chica y esta pasada casi no hace nada: ese es el
+ * objetivo, no es un parche de ultima instancia.
+ */
+function correctPositions(world: World): void {
+  const balls = world.balls;
+  const { cx, cy, R } = world;
+  const list = world.contactList;
+
+  for (let iter = 0; iter < POSITION_ITERATIONS; iter++) {
+    for (let k = 0; k < list.length; k++) {
+      const c = list[k]!;
+
+      if (c.wall) {
+        const b = balls[c.b]!;
+        if (b.sleeping) continue;
+        const dx = b.x - cx;
+        const dy = b.y - cy;
+        const d = Math.hypot(dx, dy);
+        const limit = R - b.r;
+        const pen = d - limit;
+        if (pen > SLOP && d > 1e-6) {
+          const push = POSITION_CORRECTION * (pen - SLOP);
+          b.x -= (dx / d) * push;
+          b.y -= (dy / d) * push;
+        }
+        continue;
+      }
+
+      const a = balls[c.a]!;
+      const b = balls[c.b]!;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const rsum = a.r + b.r;
+      const d2 = dx * dx + dy * dy;
+      if (d2 >= rsum * rsum) continue;
+
+      const d = Math.sqrt(d2) || 0.0001;
+      const pen = rsum - d;
+      if (pen <= SLOP) continue;
+
+      const nx = d2 < 1e-12 ? 1 : dx / d;
+      const ny = d2 < 1e-12 ? 0 : dy / d;
+      // Peso por masa inversa: una bola dormida no se mueve, la otra absorbe
+      // toda la correccion.
+      const ia = a.sleeping ? 0 : 1 / (a.r * a.r);
+      const ib = b.sleeping ? 0 : 1 / (b.r * b.r);
+      const total = ia + ib;
+      if (total <= 0) continue;
+      const push = POSITION_CORRECTION * (pen - SLOP);
+      a.x -= nx * push * (ib / total);
+      a.y -= ny * push * (ib / total);
+      b.x += nx * push * (ia / total);
+      b.y += ny * push * (ia / total);
+    }
+  }
+
+  // La correccion entre bolas puede empujar alguna contra el muro: un ajuste
+  // final garantiza que ninguna quede fuera.
+  for (let i = 0; i < balls.length; i++) {
+    const b = balls[i]!;
+    if (b.gone || b.sleeping) continue;
+    const dx = b.x - cx;
+    const dy = b.y - cy;
+    const d = Math.hypot(dx, dy);
+    const limit = R - b.r;
+    if (d > limit && d > 1e-6) {
+      b.x = cx + (dx / d) * limit;
+      b.y = cy + (dy / d) * limit;
+    }
+  }
+}
+
+/**
+ * Marca que bolas estan sostenidas. La geometria del contacto alcanza: una
+ * normal que apunta hacia arriba significa que el otro cuerpo la empuja contra
+ * la gravedad. No se exige impulso: un contacto con una bola dormida no acumula
+ * (es estatico), y sin apoyo esa bola de arriba no dormiria nunca. Una bola que
+ * cae rapido tambien puede rozar y quedar marcada, pero no duerme porque su
+ * velocidad supera el umbral.
+ */
+function markSupported(world: World): void {
+  const list = world.contactList;
+  const balls = world.balls;
+  for (let k = 0; k < list.length; k++) {
+    const c = list[k]!;
+    if (c.wall) {
+      if (c.ny < -CONTACT_SUPPORT_EPS) balls[c.b]!.supported = true;
+    } else {
+      if (c.ny > CONTACT_SUPPORT_EPS) balls[c.a]!.supported = true;
+      if (c.ny < -CONTACT_SUPPORT_EPS) balls[c.b]!.supported = true;
+    }
+  }
+}
+
+/** Descarta los contactos que no reaparecieron en este subpaso y los recicla. */
+function cleanupContacts(world: World): void {
+  const frame = world.frame;
+  for (const [key, c] of world.contacts) {
+    if (c.frame === frame) continue;
+    world.contacts.delete(key);
+    if (world.pool.length < world.maxBalls * 4) world.pool.push(c);
+  }
+}
+
+// --- Integracion temporal --------------------------------------------------
+
+function applyForces(world: World, h: number): void {
+  const dragK = Math.max(0, 1 - DRAG * h);
+  const spinDragK = Math.max(0, 1 - SPIN_DRAG * h);
+  const flowOmega = world.spinRate * world.agitation * AIR_COUPLING;
+  const flowK = flowOmega !== 0 ? 1 - Math.exp(-AIR_RATE * h) : 0;
+  const spinK = flowOmega !== 0 ? 1 - Math.exp(-AIR_SPIN_RATE * h) : 0;
+
+  const { balls, cx, cy } = world;
+  for (let i = 0; i < balls.length; i++) {
+    const b = balls[i]!;
+    if (b.gone || b.sleeping) continue;
+
+    b.vy += GRAVITY * h;
+    b.vx *= dragK;
+    b.vy *= dragK;
+    b.spin *= spinDragK;
+
+    // Aire arrastrado por el tambor. La corriente principal esta en la base y
+    // se prolonga por el flanco izquierdo (el lado ascendente) para que las
+    // bolas no pierdan el impulso al salir del fondo. En la base solo empuja en
+    // horizontal: sin componente vertical no puede sostener una bola en el aire.
+    // En el flanco izquierdo si se usa la tangente completa, que ahi apunta
+    // hacia arriba, y se apaga antes de llegar a la parte de arriba.
+    if (flowK > 0) {
+      const dx = b.x - cx;
+      const dy = b.y - cy;
+      const bottom = smoothstep(AIR_BOTTOM_START * world.R, AIR_BOTTOM_FULL * world.R, dy);
+      const left =
+        smoothstep(AIR_LEFT_START * world.R, AIR_LEFT_FULL * world.R, -dx) *
+        smoothstep(-AIR_LEFT_TOP_FADE * world.R, -AIR_LEFT_TOP_START * world.R, dy);
+      const coupling = Math.max(bottom, left);
+      if (coupling > 0) {
+        const targetVx = -flowOmega * dy;
+        const targetVy = flowOmega * dx * left;
+        b.vx += (targetVx - b.vx) * flowK * coupling;
+        b.vy += (targetVy - b.vy) * flowK * coupling;
+        b.spin += (flowOmega - b.spin) * spinK * coupling;
+      }
+    }
+
+    const speed = Math.hypot(b.vx, b.vy);
+    if (speed > MAX_SPEED) {
+      const k = MAX_SPEED / speed;
+      b.vx *= k;
+      b.vy *= k;
+    }
+  }
+}
+
+function step(world: World, h: number, omega: number): void {
+  applyForces(world, h);
+  world.frame++;
+  gatherContacts(world, omega);
+  prepareStep(world);
+  warmStart(world);
+  for (let s = 0; s < SOLVER_ITERATIONS; s++) solveAll(world);
+  integratePositions(world, h);
+  correctPositions(world);
+  markSupported(world);
+  cleanupContacts(world);
+}
+
 export function advanceWorld(world: World, dt: number, _rand: RandomSource): void {
-  if (dt <= 0) return;
+  if (!(dt > 0)) return;
 
   world.spinPhase += world.spinRate * world.agitation * dt;
   const omega = world.spinRate * world.agitation;
+  const spinning = world.agitation > WAKE_AGITATION;
+  const balls = world.balls;
 
-  // El solver recalcula `supported` desde cero en cada paso; el frame arranca
-  // limpiandolo para que no contamine lo que quedo del anterior.
-  for (const b of world.balls) {
+  for (let i = 0; i < balls.length; i++) {
+    const b = balls[i]!;
     if (b.gone) continue;
     b.supported = false;
+    // Mientras el bombo gira de verdad, nada duerme: la agitacion despierta.
+    if (spinning && b.sleeping) {
+      b.sleeping = false;
+      b.still = 0;
+    }
   }
 
-  let remaining = Math.min(dt, 0.25);
-  while (remaining > 0) {
+  let remaining = Math.min(dt, MAX_FRAME_DT);
+  while (remaining > 1e-9) {
     const h = Math.min(FIXED_DT, remaining);
-    integrate(world, h);
-    for (let s = 0; s < SOLVER_ITERATIONS; s++) {
-      resolveCollisions(world, s === 0);
-      constrainToWalls(world, omega, s === 0);
-    }
+    step(world, h, omega);
     remaining -= h;
   }
 
-  if (world.agitation > WAKE_AGITATION) {
-    // Con el bombo girando de verdad nada duerme: la agitacion es la que
-    // despierta.
-    for (const b of world.balls) {
-      if (b.gone) continue;
-      b.still = 0;
-    }
-    return;
-  }
+  if (spinning) return;
 
-  // Reposo. Sin esto la pila del fondo queda vibrando eternamente: el solver
-  // corrige posiciones, el choque devuelve velocidad, y nunca converge.
-  //
-  // La condicion de apoyo es lo que hace que esto sea seguro. Una bola que cae
-  // lento va por debajo de SLEEP_SPEED igual que una asentada, asi que sin el
-  // flag `supported` se congelaria a media caida y quedaria flotando.
-  for (const b of world.balls) {
+  // Reposo. Solo duerme lo que esta apoyado y por debajo del umbral; el flag
+  // `supported` es lo que evita congelar una bola que cae lento.
+  for (let i = 0; i < balls.length; i++) {
+    const b = balls[i]!;
     if (b.gone) continue;
-    if (
-      !b.supported ||
-      b.vx * b.vx + b.vy * b.vy > SLEEP_SPEED * SLEEP_SPEED ||
-      Math.abs(b.spin) > SLEEP_SPIN
-    ) {
+    const speed2 = b.vx * b.vx + b.vy * b.vy;
+    if (!b.supported || speed2 > SLEEP_SPEED * SLEEP_SPEED || Math.abs(b.spin) > SLEEP_SPIN) {
       b.still = 0;
       b.sleeping = false;
       continue;
@@ -841,11 +1107,67 @@ export function advanceWorld(world: World, dt: number, _rand: RandomSource): voi
   }
 }
 
-/** Util para tests: separa dos bolas que se hayan solapado. */
+/**
+ * Util para tests: separa posicionalmente bolas solapadas y las mete dentro del
+ * bombo, sin tocar velocidades. Resuelve solapamientos profundos sin inyectar
+ * energia (no hay cambio de velocidad).
+ */
 export function resolveCollisionsNow(world: World): void {
-  for (let s = 0; s < SOLVER_ITERATIONS; s++) {
-    resolveCollisions(world, s === 0);
-    constrainToWalls(world, 0, s === 0);
+  const balls = world.balls;
+  for (let iter = 0; iter < SOLVER_ITERATIONS; iter++) {
+    buildGrid(world);
+    const g = world.grid;
+    const cols = g.cols;
+
+    for (let i = 0; i < balls.length; i++) {
+      const a = balls[i]!;
+      if (a.gone) continue;
+      const rawX = ((a.x - world.cx + world.R) / g.cellSize) | 0;
+      const rawY = ((a.y - world.cy + world.R) / g.cellSize) | 0;
+
+      for (let n = 0; n < NEIGHBORS.length; n++) {
+        const gx = rawX + NEIGHBORS[n]![0];
+        const gy = rawY + NEIGHBORS[n]![1];
+        if (gx < 0 || gy < 0 || gx >= cols || gy >= cols) continue;
+        const cell = gy * cols + gx;
+        for (let k = g.counts[cell]!; k < g.counts[cell + 1]!; k++) {
+          const j = g.items[k]!;
+          if (j <= i) continue;
+          const b = balls[j]!;
+          if (b.gone) continue;
+
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const rsum = a.r + b.r;
+          const d2 = dx * dx + dy * dy;
+          if (d2 >= rsum * rsum) continue;
+
+          const d = Math.sqrt(d2) || 0.0001;
+          const nx = d2 < 1e-12 ? 1 : dx / d;
+          const ny = d2 < 1e-12 ? 0 : dy / d;
+          const overlap = rsum - d;
+          const ma = a.r * a.r;
+          const mb = b.r * b.r;
+          const total = ma + mb;
+          a.x -= nx * overlap * (mb / total);
+          a.y -= ny * overlap * (mb / total);
+          b.x += nx * overlap * (ma / total);
+          b.y += ny * overlap * (ma / total);
+        }
+      }
+    }
+
+    for (const b of balls) {
+      if (b.gone) continue;
+      const dx = b.x - world.cx;
+      const dy = b.y - world.cy;
+      const d = Math.hypot(dx, dy);
+      const limit = world.R - b.r;
+      if (d > limit && d > 1e-6) {
+        b.x = world.cx + (dx / d) * limit;
+        b.y = world.cy + (dy / d) * limit;
+      }
+    }
   }
 }
 
@@ -854,8 +1176,8 @@ export function kineticEnergy(world: World): number {
   for (const b of world.balls) {
     if (b.gone) continue;
     const m = b.r * b.r;
-    // Traslacional + rotacional (0.5 * I * w^2 con I = (2/5) m r^2).
-    total += 0.5 * m * (b.vx * b.vx + b.vy * b.vy) + 0.2 * m * b.r * b.r * b.spin * b.spin;
+    // Traslacional + rotacional (0.5 * I * w^2 con I = (1/2) m r^2).
+    total += 0.5 * m * (b.vx * b.vx + b.vy * b.vy) + 0.25 * m * b.r * b.r * b.spin * b.spin;
   }
   return total;
 }

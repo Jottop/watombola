@@ -12,8 +12,6 @@ import Base from '../layouts/Base.astro';
       <h1 id="winner-name" class="winner-name"></h1>
     </section>
 
-    <p id="nudge" class="nudge">Haz clic o pulsa una tecla para activar el sonido</p>
-
     <p id="joined" class="joined" aria-live="polite"></p>
 
     <p id="status" class="status"></p>
@@ -32,6 +30,7 @@ import Base from '../layouts/Base.astro';
       isBusy,
       loadParticipants,
       resetDrum,
+      shakeDrum,
       startDraw,
       SPIN_DURATION,
       type DrumEvents,
@@ -72,7 +71,6 @@ import Base from '../layouts/Base.astro';
     const fxCanvas = need<HTMLCanvasElement>('fx');
     const winnerEl = need<HTMLElement>('winner');
     const winnerNameEl = need<HTMLElement>('winner-name');
-    const nudgeEl = need<HTMLElement>('nudge');
     const hintEl = need<HTMLElement>('hint');
     const muteStateEl = need<HTMLElement>('mute-state');
     const joinedEl = need<HTMLElement>('joined');
@@ -276,7 +274,6 @@ import Base from '../layouts/Base.astro';
 
     async function trigger(): Promise<void> {
       await audio.unlock();
-      refreshNudge();
 
       if (state.phase === 'idle') {
         hideWinner();
@@ -291,18 +288,40 @@ import Base from '../layouts/Base.astro';
       muteStateEl.classList.toggle('is-off', next);
     }
 
-    function refreshNudge(): void {
-      nudgeEl.classList.toggle('is-visible', !audio.unlocked);
-    }
-
     stage.addEventListener('pointerdown', () => {
       if (state.phase === 'reveal') {
-        void audio.unlock().then(refreshNudge);
+        void audio.unlock();
         doReset();
         return;
       }
       void trigger();
     });
+
+    // Posicion del cursor sobre el escenario, en las mismas coordenadas que el
+    // canvas. La usa el golpe manual (R en reposo) para saber desde donde pega.
+    let pointer = { x: 0, y: 0, known: false };
+    stage.addEventListener('pointermove', (event) => {
+      const rect = stage.getBoundingClientRect();
+      pointer = { x: event.clientX - rect.left, y: event.clientY - rect.top, known: true };
+    });
+
+    function shakeFromPointer(): void {
+      const { cx, cy, R } = state.world;
+      let dx = pointer.known ? cx - pointer.x : 0;
+      let dy = pointer.known ? cy - pointer.y : 0;
+
+      // Golpe en el centro (o sin cursor conocido): no hay direccion, se elige
+      // una al azar para que igual se note la sacudida.
+      if (Math.hypot(dx, dy) < R * 0.08) {
+        const angle = cryptoRandom() * Math.PI * 2;
+        dx = Math.cos(angle);
+        dy = Math.sin(angle);
+      }
+
+      if (!shakeDrum(state, dx, dy)) return;
+      // El keydown ya es un gesto valido para desbloquear el audio.
+      void audio.unlock().then(() => audio.knock());
+    }
 
     window.addEventListener('keydown', (event) => {
       if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -315,7 +334,10 @@ import Base from '../layouts/Base.astro';
           break;
         case 'r':
         case 'R':
-          doReset();
+          // En reposo la R es un golpe al bombo, no un reinicio. Fuera de la
+          // fase inicial (sorteo en curso) sigue reiniciando.
+          if (state.phase === 'idle') shakeFromPointer();
+          else doReset();
           break;
         case 'm':
         case 'M':
@@ -387,7 +409,6 @@ import Base from '../layouts/Base.astro';
     layout();
     loadParticipants(state, readItems(), cryptoRandom);
     lastSignature = signatureOf(listParticipants());
-    refreshNudge();
     startTwitch();
     refreshStatus();
 
@@ -488,27 +509,6 @@ import Base from '../layouts/Base.astro';
     text-shadow:
       0 0 26px rgba(150, 190, 255, 0.42),
       0 10px 40px rgba(0, 0, 0, 0.75);
-  }
-
-  .nudge {
-    position: absolute;
-    top: 3%;
-    left: 50%;
-    transform: translateX(-50%);
-    margin: 0;
-    padding: 7px 16px;
-    border-radius: 999px;
-    background: rgba(11, 16, 32, 0.75);
-    border: 1px solid rgba(120, 150, 220, 0.3);
-    color: #c8d4f5;
-    font-size: clamp(12px, 1.1vw, 16px);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.35s ease;
-  }
-
-  .nudge.is-visible {
-    opacity: 1;
   }
 
   /* Aviso de anotado por chat. Reemplaza al anterior en vez de apilarse, para

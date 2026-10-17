@@ -95,6 +95,17 @@ const AIR_LEFT_TOP_START = 0.15;
 const AIR_LEFT_TOP_FADE = 0.6;
 
 /**
+ * Sacudida manual (tecla R en reposo). No es una agitacion del bombo: es un
+ * golpe puntual. Todas las bolas despiertan y reciben el impulso en la
+ * direccion del golpe, y las que estan del lado del impacto reciben casi todo
+ * porque son las que el muro empuja primero; las del lado opuesto apenas una
+ * fraccion. El golpe es fuerte a proposito: se tiene que sentir contundente.
+ */
+export const SHAKE_IMPULSE = 950;
+/** Fraccion del impulso que recibe una bola del lado opuesto al golpe. */
+const SHAKE_FAR = 0.06;
+
+/**
  * Reposo. Con warm starting el residuo de una pila asentada baja de decenas a
  * unos pocos px/s, asi que el umbral puede ser realista en vez de un parche.
  * La condicion `supported` es la que impide congelar una bola que cae lento: sin
@@ -1104,6 +1115,41 @@ export function advanceWorld(world: World, dt: number, _rand: RandomSource): voi
       b.spin = 0;
       b.sleeping = true;
     }
+  }
+}
+
+/**
+ * Golpe manual al bombo: empuja todas las bolas en la direccion dada y las
+ * despierta. La direccion apunta desde el punto del golpe hacia el centro, asi
+ * que las bolas del lado golpeado son las que salen despedidas. Las del lado
+ * opuesto reciben una fraccion (SHAKE_FAR) para que el conjunto se sienta como
+ * un golpe, no como un teletransporte.
+ */
+export function shakeWorld(world: World, dirX: number, dirY: number, strength: number): void {
+  const len = Math.hypot(dirX, dirY);
+  if (len < 1e-6 || !(strength > 0)) return;
+
+  const nx = dirX / len;
+  const ny = dirY / len;
+
+  for (let i = 0; i < world.balls.length; i++) {
+    const b = world.balls[i]!;
+    if (b.gone) continue;
+
+    b.sleeping = false;
+    b.still = 0;
+
+    const ox = b.x - world.cx;
+    const oy = b.y - world.cy;
+    const rl = Math.hypot(ox, oy) || 1;
+    // +1 si la bola esta del lado hacia donde empuja; -1 si esta del golpe.
+    const facing = (ox * nx + oy * ny) / rl;
+    // Al cuadrado para concentrar la energia en el punto del golpe.
+    const near = (1 - facing) * 0.5;
+    const kick = strength * (SHAKE_FAR + (1 - SHAKE_FAR) * near * near);
+
+    b.vx += nx * kick;
+    b.vy += ny * kick;
   }
 }
 

@@ -1,4 +1,13 @@
-﻿import { advanceWorld, addBall, createWorld, populate, type Ball, type World } from './physics';
+﻿import {
+  advanceWorld,
+  addBall,
+  createWorld,
+  populate,
+  shakeWorld,
+  SHAKE_IMPULSE,
+  type Ball,
+  type World,
+} from './physics';
 import { cryptoRandom, randomInt, shuffle, type RandomSource } from './rng';
 import type { ParticipantItem } from './types';
 
@@ -11,6 +20,15 @@ export const EJECT_STAGGER = 0.07;
 export const EJECT_TRAVEL = 0.55;
 export const REVEAL_DURATION = 0.9;
 export const EJECT_IDLE_AGITATION = 0;
+
+/**
+ * Sacudida manual (tecla R en reposo). El impulso a las bolas lo da
+ * `shakeWorld`; esto es solo el retroceso visual del bombo, que vuelve solo
+ * por un resorte con amortiguacion.
+ */
+export const SHAKE_VISUAL_V = 150;
+const SHAKE_SPRING = 90;
+const SHAKE_DAMP = 11;
 
 export interface DrumEvents {
   onPhaseChange?(phase: Phase, previous: Phase): void;
@@ -33,6 +51,11 @@ export interface DrumState {
   revealProgress: number;
   revealFired: boolean;
   winnerLabel: string;
+  /** Retroceso visual del bombo por un golpe manual. Vuelve a 0 con el resorte. */
+  shakeX: number;
+  shakeY: number;
+  shakeVX: number;
+  shakeVY: number;
 }
 
 function clamp01(value: number): number {
@@ -54,6 +77,10 @@ export function createDrumState(cx: number, cy: number, R: number, maxBalls = 20
     revealProgress: 0,
     revealFired: false,
     winnerLabel: '',
+    shakeX: 0,
+    shakeY: 0,
+    shakeVX: 0,
+    shakeVY: 0,
   };
 }
 
@@ -147,7 +174,31 @@ export function resetDrum(
   state.revealFired = false;
   state.winnerLabel = '';
   state.world.agitation = 0;
+  state.shakeX = 0;
+  state.shakeY = 0;
+  state.shakeVX = 0;
+  state.shakeVY = 0;
   populate(state.world, items, rand);
+}
+
+/**
+ * Sacude el bombo con un golpe en la direccion dada (desde el punto del golpe
+ * hacia el centro). Solo tiene sentido en reposo: mientras hay un sorteo en
+ * curso el resultado ya esta decidido y no se toca. Devuelve false si no
+ * corresponde sacudir, para que quien llama decida otra cosa (reiniciar).
+ */
+export function shakeDrum(state: DrumState, dirX: number, dirY: number): boolean {
+  if (state.phase !== 'idle') return false;
+
+  const len = Math.hypot(dirX, dirY);
+  if (len < 1e-6) return false;
+  const nx = dirX / len;
+  const ny = dirY / len;
+
+  shakeWorld(state.world, nx, ny, SHAKE_IMPULSE);
+  state.shakeVX += nx * SHAKE_VISUAL_V;
+  state.shakeVY += ny * SHAKE_VISUAL_V;
+  return true;
 }
 
 function agitationFor(phase: Phase, t: number): number {
@@ -222,6 +273,16 @@ function tick(state: DrumState, events: DrumEvents): void {
   }
 }
 
+/** Resorte amortiguado del retroceso visual: vuelve solo a cero. */
+function updateShake(state: DrumState, dt: number): void {
+  const ax = -SHAKE_SPRING * state.shakeX - SHAKE_DAMP * state.shakeVX;
+  const ay = -SHAKE_SPRING * state.shakeY - SHAKE_DAMP * state.shakeVY;
+  state.shakeVX += ax * dt;
+  state.shakeVY += ay * dt;
+  state.shakeX += state.shakeVX * dt;
+  state.shakeY += state.shakeVY * dt;
+}
+
 export function advanceDrum(
   state: DrumState,
   dt: number,
@@ -233,6 +294,7 @@ export function advanceDrum(
   state.clock += dt;
   state.phaseTime += dt;
   state.world.agitation = agitationFor(state.phase, state.phaseTime);
+  updateShake(state, dt);
 
   advanceWorld(state.world, dt, rand);
   markEjected(state);

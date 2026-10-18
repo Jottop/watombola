@@ -302,22 +302,25 @@ export function advanceDrum(
 }
 
 /**
- * Saca de la simulacion a las bolas que ya terminaron de salir.
+ * Retira de la simulacion a las bolas que EMPIEZAN a salir.
  *
- * Ojo con esto: el renderer las deja de dibujar cuando el progreso llega a 1,
- * pero mientras sigan en `world.balls` siguen empujando a las demas. El hueco de
- * una eyeccion nunca se abria, y las que quedaban no tenian donde reacomodarse:
- * quedaban colgando en el aire, sostenidas por bolas que ya no se venian.
+ * El renderer las sigue animando hasta el progreso 1, pero `gone` las saca del
+ * solver y de la rejilla desde el primer frame de la eyeccion. Si se esperara a
+ * que termine la animacion (0.55 s), la bola ocuparia espacio invisible todo ese
+ * tiempo: medido, habia ~6 bolas en vuelo empujando a la vez y el hueco recien
+ * se liberaba al final, asi que las que quedaban no bajaban cuando se veia salir
+ * una. Retirandola al empezar, el lugar se libera enseguida y la pila se
+ * reacomoda a la par de la animacion.
  *
- * Va DESPUES de advanceWorld a proposito: durante el frame en que termina de
- * salir, la bola todavia colisiona como siempre.
+ * Va DESPUES de advanceWorld: fisicamente la bola deja de contar recien en el
+ * proximo subpaso, lo que evita cortar un contacto a mitad de resolver.
  */
 function markEjected(state: DrumState): void {
   let salio = false;
   for (let i = 0; i < state.world.balls.length; i++) {
     const ball = state.world.balls[i]!;
     if (ball.gone) continue;
-    if (ejectProgressOf(state, i) >= 1) {
+    if (ejectProgressOf(state, i) >= 0) {
       ball.gone = true;
       salio = true;
     }

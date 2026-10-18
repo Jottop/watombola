@@ -81,6 +81,31 @@ describe('las expulsadas salen de la simulacion', () => {
     // Quedando la mitad, la pila tiene que estar claramente mas abajo.
     expect(late).toBeGreaterThan(early + 0.1);
   });
+
+  it('libera el lugar apenas la bola empieza a salir', () => {
+    // Regresion: la bola se sacaba de la fisica recien al completar la
+    // animacion (0.55 s), asi que mientras se la veia salir seguia empujando a
+    // las demas y su hueco no se abria. Medido: ~6 bolas en vuelo colisionando
+    // a la vez. Ahora, apenas hay progreso de eyeccion, ya no cuenta.
+    const state = makeState(30);
+    startDraw(state, seededRandom(1), {});
+
+    let enVueloActivas = 0;
+    for (let i = 0; i < 4000; i++) {
+      advanceDrum(state, 1 / 60, {}, seededRandom(i));
+      if (state.phase === 'reveal') break;
+      if (state.phase !== 'ejecting') continue;
+
+      for (let j = 0; j < state.world.balls.length; j++) {
+        const progress = ejectProgressOf(state, j);
+        // Un frame de progreso es inevitable: la eyeccion se programa despues
+        // de correr la fisica. Mas que eso significa que sigue ocupando espacio.
+        if (progress > 0.1 && !state.world.balls[j]!.gone) enVueloActivas++;
+      }
+    }
+
+    expect(enVueloActivas).toBe(0);
+  });
 });
 
 describe('sorteo', () => {

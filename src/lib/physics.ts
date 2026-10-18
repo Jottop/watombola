@@ -146,7 +146,14 @@ export interface Ball {
   still: number;
   /** Algo la sostiene ahora mismo. Solo con apoyo una bola puede dormirse. */
   supported: boolean;
-  /** Ya salio del bombo y no participa mas de la simulacion ni de la rejilla. */
+  /**
+   * Retirada de la simulacion: no participa mas del solver ni de la rejilla.
+   *
+   * Se marca cuando la bola EMPIEZA a salir, no cuando termina: su lugar tiene
+   * que quedar libre ya para que las demas se reacomoden mientras la animacion
+   * la saca del bombo. El renderer la sigue dibujando con `ejectProgressOf`
+   * hasta que el progreso llega a 1.
+   */
   gone: boolean;
   /** Congelada de verdad: la integracion y el solver la saltean. */
   sleeping: boolean;

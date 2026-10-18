@@ -4,6 +4,7 @@ import Base from '../layouts/Base.astro';
 
 <Base title="Tómbola · overlay" bodyClass="overlay-body">
   <main id="stage" class="stage">
+    <img id="keko" class="layer-keko" src="/keko.png" alt="" aria-hidden="true" />
     <canvas id="drum" class="layer"></canvas>
     <canvas id="fx" class="layer layer-fx"></canvas>
 
@@ -58,6 +59,20 @@ import Base from '../layouts/Base.astro';
       twitchRejectedSoFar,
     } from '../lib/twitch';
 
+    // Tamano del keko de fondo en relacion al bombo, y punto de la imagen que
+    // se ancla al centro del bombo. Ajustar aca para moverlo.
+    const KEKO_NATURAL_W = 1220;
+    const KEKO_NATURAL_H = 1289;
+    const KEKO_WIDTH_IN_R = 3;
+    const KEKO_ANCHOR_X = 0.6;
+    const KEKO_ANCHOR_Y = 0.65;
+    // Desplazamiento horizontal del keko respecto al bombo, en radios del
+    // bombo: positivo lo corre a la derecha, negativo a la izquierda.
+    const KEKO_OFFSET_X = 0.35;
+    // Altura del cartel del ganador respecto al centro del bombo, en radios:
+    // 0 = centro, 1 = la base. Lo deja casi apoyado en la base.
+    const WINNER_TOP_IN_R = 0.45;
+
     /** Si el markup y el script se desincronizan, que lo diga claro en vez de
      *  fallar mas adelante con un null en un sitio inexplicable. */
     function need<T extends HTMLElement>(id: string): T {
@@ -67,6 +82,7 @@ import Base from '../layouts/Base.astro';
     }
 
     const stage = need<HTMLDivElement>('stage');
+    const kekoEl = need<HTMLImageElement>('keko');
     const drumCanvas = need<HTMLCanvasElement>('drum');
     const fxCanvas = need<HTMLCanvasElement>('fx');
     const winnerEl = need<HTMLElement>('winner');
@@ -189,10 +205,27 @@ import Base from '../layouts/Base.astro';
 
       const R = Math.max(90, Math.min(width * 0.27, height * 0.31, 400));
       const cx = width / 2;
-      // El bombo va subido para dejarle aire a la base y al cartel del ganador:
-      // antes el pedestal y el nombre se pisaban en 1080p.
-      const cy = height * 0.38;
+      // El bombo baja al centro de la pantalla para que el keko sostenga la
+      // escena; el cartel del ganador se fue arriba para no pisar la base ni
+      // las manos.
+      const cy = height * 0.67;
       const changed = Math.abs(state.world.R - R) > 0.5;
+
+      // El keko va detras del bombo, como si lo sostuviera con las manos.
+      // Estas constantes son el punto de ajuste fino: cuanto ocupa respecto al
+      // radio (KEKO_WIDTH_IN_R, en radios de ancho) y que punto de la imagen
+      // cae justo sobre el centro del bombo (KEKO_ANCHOR_*, en fraccion del
+      // ancho/alto de la imagen; 0.5/0.68 deja las manos a la altura del vidrio).
+      const kekoW = R * KEKO_WIDTH_IN_R;
+      const kekoH = kekoW * (KEKO_NATURAL_H / KEKO_NATURAL_W);
+      kekoEl.style.width = `${kekoW}px`;
+      kekoEl.style.height = `${kekoH}px`;
+      kekoEl.style.left = `${cx + R * KEKO_OFFSET_X - kekoW * KEKO_ANCHOR_X}px`;
+      kekoEl.style.top = `${cy - kekoH * KEKO_ANCHOR_Y}px`;
+
+      // El cartel del ganador se apoya casi en la base del bombo. Se posiciona
+      // aca (y no en CSS) para que siga al bombo al cambiar de resolucion.
+      winnerEl.style.top = `${cy + R * WINNER_TOP_IN_R}px`;
 
       resizeWorld(state.world, cx, cy, R);
       if (changed && state.phase === 'idle') {
@@ -450,6 +483,15 @@ import Base from '../layouts/Base.astro';
     display: block;
   }
 
+  /* Fondo con el keko sosteniendo el bombo. Queda debajo del canvas (esta
+     antes en el DOM) y su posicion la calcula layout() para seguir al bombo. */
+  .layer-keko {
+    position: absolute;
+    display: block;
+    pointer-events: none;
+    user-select: none;
+  }
+
   .layer-fx {
     pointer-events: none;
   }
@@ -457,7 +499,11 @@ import Base from '../layouts/Base.astro';
   .winner {
     position: absolute;
     left: 50%;
-    bottom: 3%;
+    /* Fallback: layout() sobrescribe el top para apoyarlo en la base del
+       bombo. La caja crece hacia abajo y, si el nombre es largo, se ensancha
+       pero con tope: nunca debe salirse del ancho util. */
+    top: 75%;
+    max-width: min(94vw, 1400px);
     transform: translateX(-50%) scale(0.94);
     opacity: 0;
     text-align: center;

@@ -111,6 +111,18 @@ function drawGlass(ctx: CanvasRenderingContext2D, state: DrumState): void {
   ctx.arc(cx, cy, R * 1.2, 0, TAU);
   ctx.fill();
 
+  // Relleno de fondo del vidrio. Sin esta capa el keko de atras se transparenta
+  // a traves del bombo y las bolas pierden legibilidad. Es semitransparente para
+  // conservar el aspecto de vidrio: solo sube la opacidad lo justo.
+  const backing = ctx.createRadialGradient(cx, cy - R * 0.3, R * 0.05, cx, cy, R);
+  backing.addColorStop(0, 'rgba(40,60,116,0.5)');
+  backing.addColorStop(0.7, 'rgba(20,30,66,0.56)');
+  backing.addColorStop(1, 'rgba(12,18,44,0.62)');
+  ctx.fillStyle = backing;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, TAU);
+  ctx.fill();
+
   const inner = ctx.createRadialGradient(cx, cy - R * 0.34, R * 0.04, cx, cy, R);
   inner.addColorStop(0, 'rgba(190,214,255,0.1)');
   inner.addColorStop(0.65, 'rgba(96,132,220,0.045)');
@@ -133,7 +145,7 @@ function drawGlass(ctx: CanvasRenderingContext2D, state: DrumState): void {
     ctx.beginPath();
     ctx.moveTo(cx + Math.cos(a) * R * 0.08, cy + Math.sin(a) * R * 0.08);
     ctx.lineTo(cx + Math.cos(a) * R * 0.99, cy + Math.sin(a) * R * 0.99);
-    ctx.strokeStyle = 'rgba(214,230,255,0.05)';
+    ctx.strokeStyle = 'rgba(214,230,255,0.09)';
     ctx.stroke();
   }
 

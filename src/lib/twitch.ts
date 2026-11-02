@@ -1,13 +1,15 @@
 import { client } from 'mtmi';
-import { listParticipants, type TwitchConfig } from './store';
+import type { TwitchConfig } from './store';
 import {
   buildEntry,
+  giftRecipientCandidate,
   hasSubscriberBadge,
   isChannelOwner,
   parseEntryCommand,
-  pruneKnown,
+  subscriberCandidate,
   type EntryCandidate,
   type TwitchMessageLike,
+  type TwitchNoticeLike,
 } from './twitch-command';
 
 /**
@@ -28,14 +30,16 @@ import {
  * que siempre escribe en consola. No hay forma de desactivarlo por API.
  */
 
+export type AdmitSource = 'command' | 'sub' | 'gift';
+
 export interface TwitchHandlers {
-  onEntry: (candidate: EntryCandidate) => void;
+  /** Devuelve true si el participante realmente entro a la lista. */
+  onAdmit: (candidate: EntryCandidate, source: AdmitSource) => boolean;
 }
 
 interface Session {
   config: TwitchConfig;
   handlers: TwitchHandlers;
-  known: Set<string>;
   entries: number;
   /** Cuantos escribieron el comando y quedaron afuera por no ser suscriptores. */
   rejected: number;
@@ -43,6 +47,12 @@ interface Session {
 
 let session: Session | null = null;
 let listenerRegistered = false;
+
+function handleNotice(candidate: EntryCandidate | null, source: AdmitSource): void {
+  const current = session;
+  if (!current || !candidate) return;
+  current.handlers.onAdmit(candidate, source);
+}
 
 function ensureListener(): void {
   if (listenerRegistered) return;
@@ -53,7 +63,7 @@ function ensureListener(): void {
     if (!current) return;
 
     const event = raw as TwitchMessageLike;
-    const candidate = buildEntry(event, current.config.command, current.known, {
+    const candidate = buildEntry(event, current.config.command, {
       subscribersOnly: current.config.subscribersOnly,
     });
     if (!candidate) {
@@ -72,24 +82,24 @@ function ensureListener(): void {
       return;
     }
 
-    current.known.add(candidate.userId);
-    current.entries += 1;
-    current.handlers.onEntry(candidate);
+    if (current.handlers.onAdmit(candidate, 'command')) current.entries += 1;
   });
-}
 
-function knownFromStore(): Set<string> {
-  return new Set(listParticipants().map((p) => p.id));
-}
-
-/**
- * Sincroniza el conjunto en memoria contra la lista real. Hay que llamarla cada
- * vez que cambian los participantes: si no, a alguien que se borra del panel le
- * queda el id cacheado y no vuelve a poder entrar por chat en toda la sesion.
- */
-export function forgetMissingParticipants(): void {
-  if (!session) return;
-  pruneKnown(session.known, knownFromStore());
+  // Las subs Prime llegan como `sub` con subPlan.isPrime, asi que este handler
+  // ya las incluye. De las renovaciones solo suman las Prime.
+  client.on('sub', (raw) => handleNotice(subscriberCandidate(raw as TwitchNoticeLike), 'sub'));
+  client.on('resub', (raw) =>
+    handleNotice(
+      subscriberCandidate(raw as TwitchNoticeLike, { primeOnly: true }),
+      'sub',
+    ),
+  );
+  client.on('primepaidupgrade', (raw) =>
+    handleNotice(subscriberCandidate(raw as TwitchNoticeLike), 'sub'),
+  );
+  client.on('subgift', (raw) =>
+    handleNotice(giftRecipientCandidate(raw as TwitchNoticeLike), 'gift'),
+  );
 }
 
 /** Arranca (o cambia de canal) la escucha. Devuelve una funcion para cortarla. */
@@ -102,7 +112,7 @@ export function connectTwitch(
 
   if (!config.enabled || !config.channel) return () => {};
 
-  session = { config, handlers, known: knownFromStore(), entries: 0, rejected: 0 };
+  session = { config, handlers, entries: 0, rejected: 0 };
 
   client.connect({
     channels: [config.channel.toLowerCase()],

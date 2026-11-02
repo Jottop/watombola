@@ -1,15 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildEntry,
+  giftRecipientCandidate,
   hasSubscriberBadge,
   isChannelOwner,
   parseEntryCommand,
-  pruneKnown,
-  twitchUserId,
+  subscriberCandidate,
 } from '../src/lib/twitch-command';
 
 const CMD = '!entrar';
-const none = new Set<string>();
 
 describe('parseEntryCommand', () => {
   it('matchea el comando exacto', () => {
@@ -67,84 +66,41 @@ const message = (extra: Record<string, unknown> = {}) => ({
 describe('buildEntry', () => {
 
   it('arma el candidato con un comando valido', () => {
-    expect(buildEntry(message(), CMD, none)).toEqual({
+    expect(buildEntry(message(), CMD)).toEqual({
       userId: 'twitch:12345',
       displayName: 'Fulanito',
     });
   });
 
   it('ignora mensajes que no son el comando', () => {
-    expect(buildEntry(message({ message: 'hola' }), CMD, none)).toBeNull();
+    expect(buildEntry(message({ message: 'hola' }), CMD)).toBeNull();
   });
 
   it('ignora a los bots', () => {
     const bot = message({ userInfo: { displayName: 'Nightbot', isBot: true }, messageInfo: { userId: '9' } });
-    expect(buildEntry(bot, CMD, none)).toBeNull();
-  });
-
-  it('no deja anotarse dos veces al mismo usuario', () => {
-    const known = new Set([twitchUserId('12345')]);
-    expect(buildEntry(message(), CMD, known)).toBeNull();
-  });
-
-  it('permite mismo nombre visible con distinto userId', () => {
-    const known = new Set([twitchUserId('99999')]);
-    expect(buildEntry(message(), CMD, known)).not.toBeNull();
+    expect(buildEntry(bot, CMD)).toBeNull();
   });
 
   it('cae al username si no viene userInfo', () => {
     const bare = { username: 'fulanito', message: '!entrar' };
-    expect(buildEntry(bare, CMD, none)).toEqual({
+    expect(buildEntry(bare, CMD)).toEqual({
       userId: 'twitch:fulanito',
       displayName: 'fulanito',
     });
   });
 
   it('descarta mensajes sin usuario identificable', () => {
-    expect(buildEntry({ message: '!entrar' }, CMD, none)).toBeNull();
+    expect(buildEntry({ message: '!entrar' }, CMD)).toBeNull();
   });
 
   it('normaliza el id a minuscula', () => {
     const upper = message({ messageInfo: { userId: 'ABC123' } });
-    expect(buildEntry(upper, CMD, none)?.userId).toBe('twitch:abc123');
+    expect(buildEntry(upper, CMD)?.userId).toBe('twitch:abc123');
   });
 
   it('acepta userId numerico (como lo declara mtmi)', () => {
     const numeric = message({ messageInfo: { userId: 777 } });
-    expect(buildEntry(numeric, CMD, none)?.userId).toBe('twitch:777');
-  });
-});
-
-describe('pruneKnown', () => {
-  it('olvida a quien ya no esta en la lista, y lo deja volver a entrar', () => {
-    // Regresion: se anoto por chat, se lo borro del panel y volvio a escribir
-    // el comando. Antes el id quedaba cacheado y buildEntry lo rechazaba para
-    // siempre.
-    const known = new Set([twitchUserId('12345')]);
-    expect(buildEntry(message(), CMD, known)).toBeNull();
-
-    pruneKnown(known, new Set());
-
-    expect(buildEntry(message(), CMD, known)).not.toBeNull();
-  });
-
-  it('conserva a los que siguen en la lista', () => {
-    const id = twitchUserId('12345');
-    const known = new Set([id]);
-    pruneKnown(known, new Set([id]));
-    expect(buildEntry(message(), CMD, known)).toBeNull();
-  });
-
-  it('no toca los ids que no venian de la entrada actual', () => {
-    const known = new Set(['a', 'b', 'c']);
-    pruneKnown(known, new Set(['b']));
-    expect([...known]).toEqual(['b']);
-  });
-
-  it('aguanta el store vacio y el conjunto vacio', () => {
-    const known = new Set<string>();
-    pruneKnown(known, new Set());
-    expect(known.size).toBe(0);
+    expect(buildEntry(numeric, CMD)?.userId).toBe('twitch:777');
   });
 });
 
@@ -184,22 +140,16 @@ describe('buildEntry con filtro de suscriptores', () => {
 
   it('deja entrar a quien tiene el badge', () => {
     const sub = message({ badges: [{ name: 'subscriber', value: '3' }] });
-    expect(buildEntry(sub, CMD, none, soloSubs)).not.toBeNull();
+    expect(buildEntry(sub, CMD, soloSubs)).not.toBeNull();
   });
 
   it('deja fuera a quien no lo tiene', () => {
-    expect(buildEntry(message(), CMD, none, soloSubs)).toBeNull();
-  });
-
-  it('deja fuera a un suscriptor que ya estaba anotado', () => {
-    const sub = message({ badges: [{ name: 'subscriber', value: '3' }] });
-    const known = new Set([twitchUserId('12345')]);
-    expect(buildEntry(sub, CMD, known, soloSubs)).toBeNull();
+    expect(buildEntry(message(), CMD, soloSubs)).toBeNull();
   });
 
   it('con el filtro apagado deja entrar a cualquiera', () => {
-    expect(buildEntry(message(), CMD, none, { subscribersOnly: false })).not.toBeNull();
-    expect(buildEntry(message(), CMD, none, {})).not.toBeNull();
+    expect(buildEntry(message(), CMD, { subscribersOnly: false })).not.toBeNull();
+    expect(buildEntry(message(), CMD, {})).not.toBeNull();
   });
 
   it('el filtro no deja pasar bots suscritos', () => {
@@ -207,7 +157,7 @@ describe('buildEntry con filtro de suscriptores', () => {
       badges: [{ name: 'subscriber', value: '3' }],
       userInfo: { displayName: 'Nightbot', isBot: true },
     });
-    expect(buildEntry(bot, CMD, none, soloSubs)).toBeNull();
+    expect(buildEntry(bot, CMD, soloSubs)).toBeNull();
   });
 });
 
@@ -229,31 +179,26 @@ describe('el dueño del canal siempre puede entrar', () => {
   const soloSubs = { subscribersOnly: true };
 
   it('entra con el filtro de suscriptores activado', () => {
-    expect(buildEntry(owner, CMD, none, soloSubs)).not.toBeNull();
+    expect(buildEntry(owner, CMD, soloSubs)).not.toBeNull();
   });
 
   it('entra con el filtro apagado', () => {
-    expect(buildEntry(owner, CMD, none, { subscribersOnly: false })).not.toBeNull();
-  });
-
-  it('sigue sin entrar dos veces si ya esta anotado', () => {
-    const known = new Set([twitchUserId('12345')]);
-    expect(buildEntry(owner, CMD, known, soloSubs)).toBeNull();
+    expect(buildEntry(owner, CMD, { subscribersOnly: false })).not.toBeNull();
   });
 
   it('el filtro apagado no cambia nada para un suscriptor comun', () => {
     const sub = message({ badges: [{ name: 'subscriber', value: '3' }] });
-    expect(buildEntry(sub, CMD, none, soloSubs)).not.toBeNull();
+    expect(buildEntry(sub, CMD, soloSubs)).not.toBeNull();
   });
 
   it('un moderador sin suscripcion sigue afuera', () => {
     const mod = message({ badges: [{ name: 'moderator', value: '1' }] });
-    expect(buildEntry(mod, CMD, none, soloSubs)).toBeNull();
+    expect(buildEntry(mod, CMD, soloSubs)).toBeNull();
   });
 
   it('un VIP sin suscripcion sigue afuera', () => {
     const vip = message({ badges: [{ name: 'vip', value: '1' }] });
-    expect(buildEntry(vip, CMD, none, soloSubs)).toBeNull();
+    expect(buildEntry(vip, CMD, soloSubs)).toBeNull();
   });
 
   it('un bot con badge de broadcaster tampoco entra', () => {
@@ -261,6 +206,71 @@ describe('el dueño del canal siempre puede entrar', () => {
       badges: [{ name: 'broadcaster', value: '1' }],
       userInfo: { displayName: 'Nightbot', isBot: true },
     });
-    expect(buildEntry(botOwner, CMD, none, soloSubs)).toBeNull();
+    expect(buildEntry(botOwner, CMD, soloSubs)).toBeNull();
+  });
+});
+
+describe('subscriberCandidate', () => {
+  const notice = (extra: Record<string, unknown> = {}) => ({
+    username: 'fulanito',
+    userInfo: { displayName: 'Fulanito', username: 'fulanito', isBot: false },
+    messageInfo: { userId: '12345' },
+    ...extra,
+  });
+
+  it('arma el candidato de una sub Prime', () => {
+    expect(subscriberCandidate(notice({ subInfo: { subPlan: { isPrime: true } } }))).toEqual({
+      userId: 'twitch:12345',
+      displayName: 'Fulanito',
+    });
+  });
+
+  it('tambien acepta una sub de pago', () => {
+    expect(subscriberCandidate(notice({ subInfo: { subPlan: { isPrime: false } } }))).not.toBeNull();
+  });
+
+  it('en modo primeOnly ignora las renovaciones de pago', () => {
+    const pago = notice({ subInfo: { subPlan: { isPrime: false } } });
+    expect(subscriberCandidate(pago, { primeOnly: true })).toBeNull();
+  });
+
+  it('en modo primeOnly acepta una renovacion Prime', () => {
+    const prime = notice({ subInfo: { subPlan: { isPrime: true } } });
+    expect(subscriberCandidate(prime, { primeOnly: true })).not.toBeNull();
+  });
+
+  it('ignora a los bots', () => {
+    const bot = notice({ userInfo: { displayName: 'Nightbot', isBot: true } });
+    expect(subscriberCandidate(bot)).toBeNull();
+  });
+});
+
+describe('giftRecipientCandidate', () => {
+  it('agrega al receptor del regalo, no a quien lo dona', () => {
+    const gift = {
+      username: 'gifter',
+      userInfo: { displayName: 'ElGifter', username: 'gifter', isBot: false },
+      messageInfo: { userId: '1' },
+      giftInfo: {
+        gifterUserName: 'gifter',
+        gifterDisplayName: 'ElGifter',
+        recipientId: '222',
+        recipientUserName: 'afortunado',
+        recipientDisplayName: 'Afortunado',
+      },
+    };
+    expect(giftRecipientCandidate(gift)).toEqual({
+      userId: 'twitch:222',
+      displayName: 'Afortunado',
+    });
+  });
+
+  it('cae al login del receptor si no viene el display name', () => {
+    const gift = { giftInfo: { recipientUserName: 'afortunado' } };
+    expect(giftRecipientCandidate(gift)?.displayName).toBe('afortunado');
+  });
+
+  it('ignora un regalo masivo sin receptor individual', () => {
+    expect(giftRecipientCandidate({ giftInfo: undefined })).toBeNull();
   });
 });

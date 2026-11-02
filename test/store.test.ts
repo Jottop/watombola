@@ -121,7 +121,7 @@ describe('upsertParticipant', () => {
     setTestDataEnabled(false);
   });
 
-  it('agrega una vez y no repite al mismo id', () => {
+  it('agrega una vez y no repite el mismo id', () => {
     const first = upsertParticipant({ id: 'twitch:1', name: 'fulano' });
     expect(first.added).toBe(true);
 
@@ -130,11 +130,34 @@ describe('upsertParticipant', () => {
     expect(second.list).toHaveLength(1);
   });
 
-  it('permite mismo nombre con distinto id', () => {
+  it('permite el mismo nombre con distinto id hasta dos veces', () => {
     upsertParticipant({ id: 'twitch:1', name: 'fulano' });
     const second = upsertParticipant({ id: 'twitch:2', name: 'fulano' });
     expect(second.added).toBe(true);
     expect(second.list).toHaveLength(2);
+
+    const third = upsertParticipant({ id: 'twitch:3', name: 'FULANO' });
+    expect(third.added).toBe(false);
+    expect(third.capped).toBe(true);
+    expect(third.list).toHaveLength(2);
+  });
+
+  it('cuenta por nombre normalizado, sin importar espacios', () => {
+    upsertParticipant({ id: 'a', name: '  Ana   Gomez ' });
+    upsertParticipant({ id: 'b', name: 'ana gomez' });
+
+    const third = upsertParticipant({ id: 'c', name: 'Ana Gomez' });
+    expect(third.capped).toBe(true);
+  });
+
+  it('libera lugar al borrar una entrada', () => {
+    upsertParticipant({ id: 'a', name: 'fulano' });
+    const second = upsertParticipant({ id: 'b', name: 'fulano' });
+    saveParticipants(second.list.filter((p) => p.id !== 'a'));
+
+    const again = upsertParticipant({ id: 'c', name: 'fulano' });
+    expect(again.added).toBe(true);
+    expect(again.list).toHaveLength(2);
   });
 
   it('avisa cuando la lista esta llena', () => {
@@ -144,7 +167,21 @@ describe('upsertParticipant', () => {
     const result = upsertParticipant({ id: 'twitch:999', name: 'tarde' });
     expect(result.added).toBe(false);
     expect(result.full).toBe(true);
+    expect(result.capped).toBe(false);
     expect(result.list).toHaveLength(MAX_PARTICIPANTS);
+  });
+
+  it('con la lista llena, repetir a alguien capado se ignora en silencio', () => {
+    const full = Array.from({ length: MAX_PARTICIPANTS }, (_, i) => ({
+      id: `x${i}`,
+      name: i < 2 ? 'repetido' : `n${i}`,
+    }));
+    saveParticipants(full);
+
+    const result = upsertParticipant({ id: 'twitch:999', name: 'repetido' });
+    expect(result.added).toBe(false);
+    expect(result.capped).toBe(true);
+    expect(result.full).toBe(false);
   });
 });
 

@@ -27,6 +27,34 @@ export interface BadgeLike {
   value?: string;
 }
 
+/**
+ * Forma de los USERNOTICE que nos interesan (sub, resub, primepaidupgrade y
+ * subgift). mtmi arma estos campos desde los tags del IRC, pero sus tipos no
+ * siempre los declaran, asi que definimos la forma que usamos.
+ */
+export interface TwitchNoticeLike {
+  username?: string;
+  userInfo?: {
+    username?: string;
+    displayName?: string;
+    isBot?: boolean;
+  };
+  messageInfo?: {
+    userId?: string | number;
+  };
+  subInfo?: {
+    wasGifted?: boolean;
+    subPlan?: {
+      isPrime?: boolean;
+    };
+  };
+  giftInfo?: {
+    recipientId?: string | number;
+    recipientUserName?: string;
+    recipientDisplayName?: string;
+  };
+}
+
 export interface EntryCandidate {
   /** Clave estable del usuario. Cambiar el nombre visible no genera otra entrada. */
   userId: string;
@@ -86,13 +114,15 @@ export function twitchUserId(user: string): string {
 }
 
 /**
- * Devuelve el candidato si el mensaje es una entrada valida y el usuario todavia
- * no se anotaba. Los bots se ignoran: un !entrar de Nightbot no compite.
+ * Devuelve el candidato si el mensaje es una entrada valida. Los bots se
+ * ignoran: un !entrar de Nightbot no compite.
+ *
+ * No se descarta a quien ya esta en la lista: el store es el que aplica el tope
+ * de dos pelotas por persona.
  */
 export function buildEntry(
   raw: TwitchMessageLike,
   command: string,
-  knownUserIds: ReadonlySet<string>,
   options: EntryOptions = {},
 ): EntryCandidate | null {
   const text = raw.message ?? '';
@@ -109,30 +139,60 @@ export function buildEntry(
   const userId = String(rawUserId).trim();
   if (!userId) return null;
 
-  const id = twitchUserId(userId);
-  if (knownUserIds.has(id)) return null;
-
   const displayName = (raw.userInfo?.displayName ?? raw.username ?? userId).trim();
   if (!displayName) return null;
 
-  return { userId: id, displayName };
+  return { userId: twitchUserId(userId), displayName };
 }
 
 /**
- * Olvida los ids que ya no estan en la lista de participantes.
+ * Candidato a partir de un aviso de suscripcion. Sirve para `sub`,
+ * `primepaidupgrade` y, con `primeOnly`, para las renovaciones Prime.
  *
- * `known` es una copia en memoria del store que se carga al conectar y crece con
- * cada entrada, para que un mismo mensaje no se procese dos veces. El problema es
- * que sin esta poda queda desincronizada: si a alguien lo borran del panel
- * mientras la conexion sigue viva, su id sigue en `known`, `buildEntry` lo
- * descarta, y esa persona no puede volver a entrar nunca mas.
- *
- * Pisar contra el store es la direccion correcta: lo que importa es quien esta
- * ahora en la tombola, no quien estuvo alguna vez. Tambien destraba a quien
- * intento entrar con la tombola llena y quedo afuera.
+ * Las subs Prime llegan como `sub` con `subInfo.subPlan.isPrime` en true: no
+ * necesitan un evento propio, pero el filtro de `resub` si las distingue de las
+ * renovaciones de pago.
  */
-export function pruneKnown(known: Set<string>, present: ReadonlySet<string>): void {
-  for (const id of known) {
-    if (!present.has(id)) known.delete(id);
-  }
+export function subscriberCandidate(
+  raw: TwitchNoticeLike,
+  options: { primeOnly?: boolean } = {},
+): EntryCandidate | null {
+  if (options.primeOnly && !raw.subInfo?.subPlan?.isPrime) return null;
+  if (raw.userInfo?.isBot) return null;
+
+  const rawUserId = raw.messageInfo?.userId ?? raw.userInfo?.username ?? raw.username;
+  if (rawUserId === undefined || rawUserId === null) return null;
+
+  const userId = String(rawUserId).trim();
+  if (!userId) return null;
+
+  const displayName = (
+    raw.userInfo?.displayName ??
+    raw.userInfo?.username ??
+    raw.username ??
+    userId
+  ).trim();
+  if (!displayName) return null;
+
+  return { userId: twitchUserId(userId), displayName };
+}
+
+/**
+ * Candidato a partir de un `subgift`. Solo cuenta el receptor: el que regala
+ * viene en `userInfo`/`gifter*` y no debe entrar por este evento.
+ */
+export function giftRecipientCandidate(raw: TwitchNoticeLike): EntryCandidate | null {
+  const info = raw.giftInfo;
+  if (!info) return null;
+
+  const rawUserId = info.recipientId ?? info.recipientUserName;
+  if (rawUserId === undefined || rawUserId === null) return null;
+
+  const userId = String(rawUserId).trim();
+  if (!userId) return null;
+
+  const displayName = (info.recipientDisplayName ?? info.recipientUserName ?? userId).trim();
+  if (!displayName) return null;
+
+  return { userId: twitchUserId(userId), displayName };
 }

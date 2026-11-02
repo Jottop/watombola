@@ -11,6 +11,9 @@ const APP_KEYS = [PARTICIPANTS_KEY, DRAWS_KEY, TEST_DATA_KEY, TWITCH_KEY] as con
 
 export const MAX_PARTICIPANTS = 200;
 
+/** Tope de pelotas por persona. El mismo nombre puede entrar hasta dos veces. */
+export const MAX_BALLS_PER_USER = 2;
+
 function storage(): Storage | null {
   try {
     return typeof localStorage === 'undefined' ? null : localStorage;
@@ -30,6 +33,16 @@ export function normalizeName(raw: string): string {
 
 export function isValidName(raw: string): boolean {
   return normalizeName(raw).length >= 2;
+}
+
+/** Clave estable para contar entradas de una misma persona. */
+export function nameKey(name: string): string {
+  return normalizeName(name).toLowerCase();
+}
+
+export function countByName(list: readonly Participant[], name: string): number {
+  const key = nameKey(name);
+  return list.reduce((count, p) => (nameKey(p.name) === key ? count + 1 : count), 0);
 }
 
 /** "Valeria Ortiz Mendez" -> "Valeria M." para que entre legible en la bola. */
@@ -82,8 +95,8 @@ export function removeTestParticipants(): Participant[] {
 /**
  * Si los datos de prueba estan habilitados, la primera carga (cuando no hay
  * lista guardada) siembra los 57 nombres ficticios. Deshabilitarlo NO borra la
- * lista actual: solo cambia que pasa en esa carga inicial. Para meterlos a
- * pedido esta el boton "Cargar datos de ejemplo" del panel de control.
+ * lista actual: solo cambia que pasa en esa carga inicial. Para prenderlos y
+ * apagarlos a pedido esta el checkbox "Datos de prueba al iniciar" del panel.
  */
 export function isTestDataEnabled(): boolean {
   const store = storage();
@@ -132,24 +145,43 @@ export function clearParticipants(): void {
   saveParticipants([]);
 }
 
-/**
- * Alta de un participante sin perder el resto de la lista. La deduplicacion es
- * por `id`, que para los que vienen de Twitch es `twitch:<userId>`: asi
- * alguien que cambia su nombre visible no se cuela dos veces en el sorteo.
- */
-export function upsertParticipant(participant: Participant): {
+export interface UpsertResult {
   list: Participant[];
   added: boolean;
+  /** La tombola ya tiene MAX_PARTICIPANTS pelotas. */
   full: boolean;
-} {
+  /** Esa persona ya tiene MAX_BALLS_PER_USER pelotas. */
+  capped: boolean;
+  /** La entrada creada, solo cuando added es true. */
+  participant?: Participant;
+}
+
+/**
+ * Alta de un participante sin perder el resto de la lista.
+ *
+ * El `id` es idempotente para no procesar dos veces el mismo evento. El tope,
+ * en cambio, se cuenta por nombre normalizado: asi una entrada manual y otra
+ * por chat de la misma persona comparten las dos pelotas permitidas.
+ */
+export function upsertParticipant(participant: Participant): UpsertResult {
   const list = listParticipants();
 
-  if (list.some((p) => p.id === participant.id)) return { list, added: false, full: false };
-  if (list.length >= MAX_PARTICIPANTS) return { list, added: false, full: true };
+  if (list.some((p) => p.id === participant.id)) {
+    return { list, added: false, full: false, capped: false };
+  }
+  // El tope por persona va antes que el de la tombola: repetir una entrada ya
+  // capada se ignora en silencio aunque ademas la lista este llena.
+  if (countByName(list, participant.name) >= MAX_BALLS_PER_USER) {
+    return { list, added: false, full: false, capped: true };
+  }
+  if (list.length >= MAX_PARTICIPANTS) {
+    return { list, added: false, full: true, capped: false };
+  }
 
-  const next = [...list, participant];
+  const entry: Participant = { id: participant.id, name: normalizeName(participant.name) };
+  const next = [...list, entry];
   saveParticipants(next);
-  return { list: next, added: true, full: false };
+  return { list: next, added: true, full: false, capped: false, participant: entry };
 }
 
 export interface TwitchConfig {

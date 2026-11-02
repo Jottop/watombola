@@ -106,7 +106,6 @@ import '../styles/app.css';
           <span>Datos de prueba al iniciar</span>
         </label>
         <div class="row">
-          <button id="load-mock" type="button">Cargar datos de ejemplo</button>
           <button id="clear-all" class="danger" type="button">Vaciar todo</button>
         </div>
       </div>
@@ -192,12 +191,15 @@ import '../styles/app.css';
       listDraws,
       listParticipants,
       makeId,
+      MAX_BALLS_PER_USER,
       MAX_PARTICIPANTS,
+      nameKey,
       normalizeName,
       parseImportText,
       readTwitchConfig,
       saveParticipants,
       toCsv,
+      upsertParticipant,
       writeTwitchConfig,
     } from '../lib/store';
     import type { Participant } from '../lib/types';
@@ -289,9 +291,23 @@ import '../styles/app.css';
       if (replace) {
         list = incoming.slice(0, MAX_PARTICIPANTS);
       } else {
-        const known = new Set(list.map((p) => p.name.toLowerCase()));
-        const fresh = incoming.filter((p) => !known.has(p.name.toLowerCase()));
-        list = [...list, ...fresh].slice(0, MAX_PARTICIPANTS);
+        const counts = new Map<string, number>();
+        for (const person of list) {
+          const key = nameKey(person.name);
+          counts.set(key, (counts.get(key) ?? 0) + 1);
+        }
+
+        const fresh: Participant[] = [];
+        for (const person of incoming) {
+          if (list.length + fresh.length >= MAX_PARTICIPANTS) break;
+
+          const key = nameKey(person.name);
+          const count = counts.get(key) ?? 0;
+          if (count >= MAX_BALLS_PER_USER) continue;
+          counts.set(key, count + 1);
+          fresh.push(person);
+        }
+        list = [...list, ...fresh];
       }
 
       saveParticipants(list);
@@ -301,9 +317,12 @@ import '../styles/app.css';
     addForm.addEventListener('submit', (event) => {
       event.preventDefault();
       const name = normalizeName(addInput.value);
-      if (name.length < 2 || list.length >= MAX_PARTICIPANTS) return;
-      list.push({ id: makeId(), name });
-      saveParticipants(list);
+      if (name.length < 2) return;
+
+      const result = upsertParticipant({ id: makeId(), name });
+      if (!result.added) return;
+
+      list = result.list;
       addInput.value = '';
       render();
       addInput.focus();
@@ -391,13 +410,6 @@ import '../styles/app.css';
       link.download = 'participantes.csv';
       link.click();
       URL.revokeObjectURL(url);
-    });
-
-    byId<HTMLButtonElement>('load-mock').addEventListener('click', () => {
-      // Agrega los de ejemplo sin pisar lo que haya cargado a mano. Antes
-      // reemplazaba la lista entera y se llevaba puestos los de Twitch.
-      list = applyTestData(true);
-      render();
     });
 
     byId<HTMLButtonElement>('clear-all').addEventListener('click', () => {

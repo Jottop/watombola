@@ -17,6 +17,8 @@ import Base from '../layouts/Base.astro';
 
     <p id="status" class="status"></p>
 
+    <p id="ball-count" class="ball-count"></p>
+
     <p id="hint" class="hint">
       <kbd>Espacio</kbd> sortear · <kbd>R</kbd> reiniciar · <kbd>M</kbd>
       {" "}<span id="mute-state">silenciar</span> · <kbd>Esc</kbd> cerrar ganador
@@ -42,6 +44,7 @@ import Base from '../layouts/Base.astro';
     import {
       addDraw,
       listParticipants,
+      makeId,
       MAX_PARTICIPANTS,
       readTwitchConfig,
       toBallLabel,
@@ -54,7 +57,6 @@ import Base from '../layouts/Base.astro';
     import {
       connectTwitch,
       disconnectTwitch,
-      forgetMissingParticipants,
       twitchEntriesSoFar,
       twitchRejectedSoFar,
     } from '../lib/twitch';
@@ -91,6 +93,7 @@ import Base from '../layouts/Base.astro';
     const muteStateEl = need<HTMLElement>('mute-state');
     const joinedEl = need<HTMLElement>('joined');
     const statusEl = need<HTMLElement>('status');
+    const ballCountEl = need<HTMLElement>('ball-count');
 
     // getContext devuelve null si el navegador no soporta Canvas 2D.
     // El narrowing no llega a las closures si usamos function declarations
@@ -136,7 +139,13 @@ import Base from '../layouts/Base.astro';
       joinedTimer = setTimeout(() => joinedEl.classList.remove('is-visible'), 2500);
     }
 
+    function refreshBallCount(): void {
+      const count = state.world.balls.length;
+      ballCountEl.textContent = `${count} pelota${count === 1 ? '' : 's'}`;
+    }
+
     function refreshStatus(): void {
+      refreshBallCount();
       if (!params.has('ui')) return;
       const cfg = readTwitchConfig();
       const listening = cfg.enabled && cfg.channel !== '';
@@ -153,29 +162,43 @@ import Base from '../layouts/Base.astro';
         ` (${twitchEntriesSoFar()} por chat${rejected})`;
     }
 
-    /** Alguien escribio el comando en el chat de Twitch. */
-    function admitFromChat(userId: string, displayName: string): void {
-      const participant = { id: userId, name: displayName };
-      const result = upsertParticipant(participant);
-      if (!result.added) return;
+    function showFullNotice(): void {
+      joinedEl.textContent = 'La tómbola está llena';
+      joinedEl.classList.add('is-visible');
+      clearTimeout(joinedTimer);
+      joinedTimer = setTimeout(() => joinedEl.classList.remove('is-visible'), 2500);
+    }
 
-      participantsById.set(userId, participant);
-      const outcome = admitParticipant(state, { id: userId, label: toBallLabel(displayName) });
+    /** Alta en vivo desde el comando o desde una suscripcion/regalo. */
+    function admit(candidate: { displayName: string }): boolean {
+      const participant = { id: makeId(), name: candidate.displayName };
+      const result = upsertParticipant(participant);
+
+      // El overlay ya aplico este cambio. Sin actualizar la firma, el sondeo de
+      // respaldo lo ve como externo y vuelve a poblar todas las bolas.
+      lastSignature = signatureOf(result.list);
+
+      if (!result.added) {
+        if (result.full) showFullNotice();
+        return false;
+      }
+
+      const added = result.participant!;
+      participantsById.set(added.id, added);
+      const outcome = admitParticipant(state, { id: added.id, label: toBallLabel(added.name) });
 
       if (outcome === 'busy') {
-        showJoined(`${displayName} (para el próximo sorteo)`);
+        showJoined(`${added.name} (para el próximo sorteo)`);
       } else if (outcome === 'full') {
-        joinedEl.textContent = 'La tómbola está llena';
-        joinedEl.classList.add('is-visible');
-        clearTimeout(joinedTimer);
-        joinedTimer = setTimeout(() => joinedEl.classList.remove('is-visible'), 2500);
+        showFullNotice();
       } else {
-        showJoined(displayName);
+        showJoined(added.name);
         audio.pop(0.15);
       }
 
       syncShowLabels();
       refreshStatus();
+      return true;
     }
 
     function startTwitch(): void {
@@ -184,7 +207,7 @@ import Base from '../layouts/Base.astro';
       if (!cfg.enabled || !cfg.channel) return;
 
       connectTwitch(cfg, {
-        onEntry: (candidate) => admitFromChat(candidate.userId, candidate.displayName),
+        onAdmit: (candidate) => admit(candidate),
       });
     }
 
@@ -280,6 +303,7 @@ import Base from '../layouts/Base.astro';
       // marcar nada pendiente: doReset() vuelve a leer la lista.
       if (!loadParticipants(state, readItems(preloaded), cryptoRandom)) return;
 
+      lastSignature = signatureOf(preloaded ?? listParticipants());
       syncShowLabels();
       refreshStatus();
     }
@@ -299,9 +323,7 @@ import Base from '../layouts/Base.astro';
       const signature = signatureOf(list);
       if (signature === lastSignature) return;
       lastSignature = signature;
-      // Solo cuando la lista cambio de verdad. Podar en cada vuelta haria que
-      // uno que insiste con la tombola llena se re procesara todo el tiempo.
-      forgetMissingParticipants();
+      // Solo cuando la lista cambio de verdad.
       reloadParticipants(list);
     }
 
@@ -385,12 +407,7 @@ import Base from '../layouts/Base.astro';
     });
 
     window.addEventListener('storage', (event) => {
-      if (event.key === 'tombola:participantes:v1') {
-        // La lista cambio: hay que soltar los ids cacheados de chat que ya no
-        // estan, o el que se borro del panel no vuelve a poder entrar.
-        forgetMissingParticipants();
-        reloadParticipants();
-      }
+      if (event.key === 'tombola:participantes:v1') reloadParticipants();
       // Cambiar canal o comando en el panel reconecta la escucha.
       if (event.key === 'tombola:twitch:v1') startTwitch();
     });
@@ -597,6 +614,22 @@ import Base from '../layouts/Base.astro';
 
   .status:empty {
     display: none;
+  }
+
+  /* Contador de pelotas: siempre visible, arriba a la derecha. */
+  .ball-count {
+    position: absolute;
+    right: 2%;
+    top: 3%;
+    margin: 0;
+    padding: 5px 14px;
+    border-radius: 999px;
+    background: rgba(11, 16, 32, 0.6);
+    border: 1px solid rgba(140, 170, 230, 0.28);
+    color: rgba(220, 230, 255, 0.8);
+    font-size: clamp(11px, 1vw, 16px);
+    font-weight: 600;
+    pointer-events: none;
   }
 
   .hint {
